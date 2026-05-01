@@ -193,7 +193,7 @@ impl CdnaSchema {
     /// Calculate hash of this C-DNA schema
     pub fn calculate_hash(&self) -> String {
         use sha2::{Digest, Sha256};
-        
+
         let json = serde_json::to_string(self).unwrap_or_default();
         let mut hasher = Sha256::new();
         hasher.update(json.as_bytes());
@@ -260,10 +260,7 @@ mod tests {
 
     #[test]
     fn test_cdna_hash() {
-        let schema = CdnaSchema::new(
-            "test.program.v1".to_string(),
-            "Test program".to_string(),
-        );
+        let schema = CdnaSchema::new("test.program.v1".to_string(), "Test program".to_string());
 
         let hash = schema.calculate_hash();
         assert_eq!(hash.len(), 64); // SHA-256 hex length
@@ -272,10 +269,7 @@ mod tests {
     #[test]
     fn test_cdna_proof() -> crate::Result<()> {
         let keypair = crate::crypto::generate_keypair();
-        let schema = CdnaSchema::new(
-            "test.program.v1".to_string(),
-            "Test program".to_string(),
-        );
+        let schema = CdnaSchema::new("test.program.v1".to_string(), "Test program".to_string());
 
         let proof = schema.create_proof(&keypair)?;
         assert!(!proof.proof_id.is_empty());
@@ -287,6 +281,3 @@ mod tests {
         Ok(())
     }
 }
-
-
-

@@ -130,7 +130,7 @@ impl Manifest {
     /// Get canonical hash of this manifest
     pub fn canonical_hash(&self) -> String {
         use sha2::{Digest, Sha256};
-        
+
         let manifest_json = serde_json::to_string(self).unwrap_or_default();
         let mut hasher = Sha256::new();
         hasher.update(manifest_json.as_bytes());
@@ -207,4 +207,3 @@ mod tests {
         assert!(fingerprint.process_id > 0);
     }
 }
-

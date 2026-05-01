@@ -1,14 +1,14 @@
 //! Integration tests for MKPE core library
 
+use morse_kirby_core::proof::create_recursive_proofs;
 use morse_kirby_core::*;
-use morse_kirby_core::proof::{create_recursive_proofs, create_proof_bundle};
 use std::fs;
 use tempfile::TempDir;
 
 #[test]
 fn test_complete_workflow() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    
+
     // 1. Generate keypair
     let keypair = generate_keypair();
     assert!(!keypair.private_key.is_empty());
@@ -16,7 +16,10 @@ fn test_complete_workflow() -> Result<()> {
 
     // 2. Create test files
     for i in 0..5 {
-        fs::write(temp_dir.path().join(format!("file{}.txt", i)), format!("Content {}", i))?;
+        fs::write(
+            temp_dir.path().join(format!("file{}.txt", i)),
+            format!("Content {}", i),
+        )?;
     }
 
     // 3. Create proofs
@@ -41,7 +44,7 @@ fn test_complete_workflow() -> Result<()> {
 
     // 7. Create archive
     let archive_path = temp_dir.path().join("test.mkpe");
-    let archive = create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
+    create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
 
     // 8. Load and verify archive
     let loaded = MkpeArchive::load(&archive_path)?;
@@ -53,7 +56,7 @@ fn test_complete_workflow() -> Result<()> {
 #[test]
 fn test_cdna_workflow() -> Result<()> {
     let keypair = generate_keypair();
-    
+
     // Create C-DNA schema
     let mut schema = CdnaSchema::new(
         "test.program.v1".to_string(),
@@ -77,4 +80,3 @@ fn test_cdna_workflow() -> Result<()> {
 
     Ok(())
 }
-
