@@ -12,6 +12,7 @@ use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -529,6 +530,10 @@ impl MkpeArchive {
         self.clone().verify()?;
 
         let artifact_path = artifact_path.as_ref();
+        if artifact_path.is_dir() {
+            assert_directory_inventory_matches(artifact_path, &self.bundles)?;
+        }
+
         for bundle in &self.bundles {
             for proof in &bundle.proofs {
                 let current_path = resolve_proof_path(artifact_path, proof);
@@ -663,6 +668,9 @@ fn collect_artifact_proofs(
             collect_artifact_proofs(root, &path, keypair, proofs)?;
             continue;
         }
+        if is_mkpe_sidecar_file(&path) {
+            continue;
+        }
 
         let mut proof = crate::proof::create_proof_item(&path, keypair)?;
         proof.path = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
@@ -670,6 +678,66 @@ fn collect_artifact_proofs(
     }
 
     Ok(())
+}
+
+fn assert_directory_inventory_matches(root: &Path, bundles: &[ProofBundle]) -> Result<()> {
+    let proven_paths: BTreeSet<PathBuf> = bundles
+        .iter()
+        .flat_map(|bundle| bundle.proofs.iter().map(|proof| proof.path.clone()))
+        .collect();
+    let current_paths = collect_current_artifact_paths(root)?;
+
+    if proven_paths == current_paths {
+        return Ok(());
+    }
+
+    let missing: Vec<String> = proven_paths
+        .difference(&current_paths)
+        .map(|path| path.display().to_string())
+        .collect();
+    let extra: Vec<String> = current_paths
+        .difference(&proven_paths)
+        .map(|path| path.display().to_string())
+        .collect();
+
+    Err(MkpeError::VerificationFailed(format!(
+        "Artifact inventory changed. Missing proven files: [{}]. Unproven files: [{}]",
+        missing.join(", "),
+        extra.join(", ")
+    )))
+}
+
+fn collect_current_artifact_paths(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    let mut paths = BTreeSet::new();
+    collect_current_artifact_paths_inner(root, root, &mut paths)?;
+    Ok(paths)
+}
+
+fn collect_current_artifact_paths_inner(
+    root: &Path,
+    dir: &Path,
+    paths: &mut BTreeSet<PathBuf>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_current_artifact_paths_inner(root, &path, paths)?;
+            continue;
+        }
+        if is_mkpe_sidecar_file(&path) {
+            continue;
+        }
+
+        paths.insert(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+    }
+
+    Ok(())
+}
+
+fn is_mkpe_sidecar_file(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()) == Some(".mkpe")
+        || path.extension().and_then(|ext| ext.to_str()) == Some("mkpe")
 }
 
 fn resolve_proof_path(artifact_path: &Path, proof: &ProofItem) -> PathBuf {
@@ -768,6 +836,29 @@ mod tests {
         std::fs::write(&file_path, b"tampered byte dna")?;
 
         let tampered = archive.verify_artifact(&file_path);
+        assert!(tampered.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_verify_artifact_detects_new_unproven_folder_file() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
+        std::fs::write(artifact_dir.join("a.txt"), b"first proven bytes")?;
+
+        let archive_path = temp_dir.path().join("artifact.mkpe");
+        create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
+
+        let archive = MkpeArchive::load(&archive_path)?;
+        archive.verify_artifact(&artifact_dir)?;
+
+        std::fs::write(artifact_dir.join("b.txt"), b"new unproven bytes")?;
+
+        let tampered = archive.verify_artifact(&artifact_dir);
         assert!(tampered.is_err());
 
         Ok(())

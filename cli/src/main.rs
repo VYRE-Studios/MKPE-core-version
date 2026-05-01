@@ -168,6 +168,8 @@ fn keygen_command(output: PathBuf, verbose: bool) -> Result<()> {
 
     let keypair = generate_keypair();
 
+    std::fs::create_dir_all(&output).context("Failed to create key output directory")?;
+
     let private_key_path = output.join("mkpe_private.key");
     let public_key_path = output.join("mkpe_public.key");
 
