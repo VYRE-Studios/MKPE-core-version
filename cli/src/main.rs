@@ -101,6 +101,45 @@ enum Commands {
 
     /// Show MKPE version and build information
     Version,
+
+    /// DNA provenance commands for sidecar .mkpe proofs
+    Dna {
+        #[command(subcommand)]
+        command: DnaCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum DnaCommands {
+    /// Create a sidecar .mkpe DNA proof for a file or folder
+    Create {
+        /// Artifact file or folder to prove
+        artifact: PathBuf,
+
+        /// Private key file
+        #[arg(short, long)]
+        key: PathBuf,
+
+        /// Output .mkpe sidecar path
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+
+    /// Verify current artifact bytes against a .mkpe sidecar proof
+    Verify {
+        /// Artifact file or folder to verify
+        artifact: PathBuf,
+
+        /// .mkpe sidecar proof bundle
+        #[arg(short, long)]
+        bundle: PathBuf,
+    },
+
+    /// Inspect a .mkpe DNA proof bundle
+    Inspect {
+        /// .mkpe sidecar proof bundle
+        bundle: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -111,10 +150,16 @@ fn main() -> Result<()> {
         Commands::Sign { path, key, output } => sign_command(path, key, output, cli.verbose),
         Commands::Verify { path, detailed } => verify_command(path, detailed, cli.verbose),
         Commands::Bundle { path, key, output } => bundle_command(path, key, output, cli.verbose),
-        Commands::Inspect { path, export_manifest } => inspect_command(path, export_manifest, cli.verbose),
+        Commands::Inspect {
+            path,
+            export_manifest,
+        } => inspect_command(path, export_manifest, cli.verbose),
         Commands::Hash { path } => hash_command(path, cli.verbose),
-        Commands::ValidateCdna { path, proof, key } => validate_cdna_command(path, proof, key, cli.verbose),
+        Commands::ValidateCdna { path, proof, key } => {
+            validate_cdna_command(path, proof, key, cli.verbose)
+        }
         Commands::Version => version_command(),
+        Commands::Dna { command } => dna_command(command, cli.verbose),
     }
 }
 
@@ -128,8 +173,7 @@ fn keygen_command(output: PathBuf, verbose: bool) -> Result<()> {
 
     std::fs::write(&private_key_path, &keypair.private_key)
         .context("Failed to write private key")?;
-    std::fs::write(&public_key_path, &keypair.public_key)
-        .context("Failed to write public key")?;
+    std::fs::write(&public_key_path, &keypair.public_key).context("Failed to write public key")?;
 
     println!("{}", "✓ Keypair generated successfully!".green().bold());
     println!("  {} {}", "Private key:".bold(), private_key_path.display());
@@ -144,22 +188,28 @@ fn keygen_command(output: PathBuf, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn sign_command(path: PathBuf, key_path: PathBuf, output: Option<PathBuf>, verbose: bool) -> Result<()> {
+fn sign_command(
+    path: PathBuf,
+    key_path: PathBuf,
+    output: Option<PathBuf>,
+    _verbose: bool,
+) -> Result<()> {
     println!("{} {}", "🔏 Signing:".bold().cyan(), path.display());
 
-    let private_key = std::fs::read_to_string(&key_path)
-        .context("Failed to read private key")?;
+    let private_key = std::fs::read_to_string(&key_path).context("Failed to read private key")?;
 
     let public_key_path = key_path.with_file_name("mkpe_public.key");
     let public_key = std::fs::read_to_string(&public_key_path)
         .context("Failed to read public key (expected mkpe_public.key in same directory)")?;
 
     let key_id = uuid::Uuid::new_v4().to_string();
-    let keypair = KeyPair::new(private_key.trim().to_string(), public_key.trim().to_string(), key_id);
+    let keypair = KeyPair::new(
+        private_key.trim().to_string(),
+        public_key.trim().to_string(),
+        key_id,
+    );
 
-    let output_path = output.unwrap_or_else(|| {
-        path.with_extension("mkpe")
-    });
+    let output_path = output.unwrap_or_else(|| path.with_extension("mkpe"));
 
     let archive = create_mkpe_bundle(&path, &keypair, &output_path)
         .context("Failed to create MKPE bundle")?;
@@ -176,16 +226,30 @@ fn sign_command(path: PathBuf, key_path: PathBuf, output: Option<PathBuf>, verbo
     Ok(())
 }
 
+fn load_keypair(key_path: &PathBuf) -> Result<KeyPair> {
+    let private_key = std::fs::read_to_string(key_path).context("Failed to read private key")?;
+
+    let public_key_path = key_path.with_file_name("mkpe_public.key");
+    let public_key = std::fs::read_to_string(&public_key_path)
+        .context("Failed to read public key (expected mkpe_public.key in same directory)")?;
+
+    let key_id = uuid::Uuid::new_v4().to_string();
+    Ok(KeyPair::new(
+        private_key.trim().to_string(),
+        public_key.trim().to_string(),
+        key_id,
+    ))
+}
+
 fn verify_command(path: PathBuf, detailed: bool, verbose: bool) -> Result<()> {
     println!("{} {}", "🔍 Verifying:".bold().cyan(), path.display());
 
-    let archive = MkpeArchive::load(&path)
-        .context("Failed to load MKPE archive")?;
+    let archive = MkpeArchive::load(&path).context("Failed to load MKPE archive")?;
 
     match archive.verify() {
         Ok(verified_archive) => {
             println!("{}", "✓ Verification PASSED".green().bold());
-            
+
             if detailed || verbose {
                 // Access inner archive from verified wrapper
                 let archive = verified_archive.inner();
@@ -195,8 +259,12 @@ fn verify_command(path: PathBuf, detailed: bool, verbose: bool) -> Result<()> {
                 println!("  {} {}", "Root hash:".bold(), stats.root_hash);
                 println!("  {} {}", "Bundle count:".bold(), stats.bundle_count);
                 println!("  {} {}", "Total proofs:".bold(), stats.total_proof_items);
-                println!("  {} {}", "Created:".bold(), stats.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
-                
+                println!(
+                    "  {} {}",
+                    "Created:".bold(),
+                    stats.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+                );
+
                 println!("\n{}", "System Fingerprint:".bold());
                 let fingerprint = &archive.manifest.system_fingerprint;
                 println!("  {} {}", "User:".bold(), fingerprint.user);
@@ -204,7 +272,7 @@ fn verify_command(path: PathBuf, detailed: bool, verbose: bool) -> Result<()> {
                 println!("  {} {}", "Hostname:".bold(), fingerprint.hostname);
                 println!("  {} {}", "MKPE version:".bold(), fingerprint.mkpe_version);
             }
-        },
+        }
         Err(e) => {
             println!("{}", "✗ Verification FAILED".red().bold());
             println!("  Error: {}", e);
@@ -222,19 +290,30 @@ fn bundle_command(path: PathBuf, key_path: PathBuf, output: PathBuf, verbose: bo
 fn inspect_command(path: PathBuf, export_manifest: Option<PathBuf>, _verbose: bool) -> Result<()> {
     println!("{} {}", "🔎 Inspecting:".bold().cyan(), path.display());
 
-    let archive = MkpeArchive::load(&path)
-        .context("Failed to load MKPE archive")?;
+    let archive = MkpeArchive::load(&path).context("Failed to load MKPE archive")?;
 
     let stats = archive.stats();
 
     println!("\n{}", "Archive Statistics:".bold());
     println!("  {} {}", "Format version:".bold(), archive.format_version);
-    println!("  {} {}", "Schema version:".bold(), archive.manifest.schema_version);
-    println!("  {} {}", "Engine version:".bold(), archive.manifest.engine_version);
+    println!(
+        "  {} {}",
+        "Schema version:".bold(),
+        archive.manifest.schema_version
+    );
+    println!(
+        "  {} {}",
+        "Engine version:".bold(),
+        archive.manifest.engine_version
+    );
     println!("  {} {}", "Manifest ID:".bold(), stats.manifest_id);
     println!("  {} {}", "Bundle count:".bold(), stats.bundle_count);
     println!("  {} {}", "Total proofs:".bold(), stats.total_proof_items);
-    println!("  {} {}", "Created:".bold(), stats.created_at.format("%Y-%m-%d %H:%M:%S UTC"));
+    println!(
+        "  {} {}",
+        "Created:".bold(),
+        stats.created_at.format("%Y-%m-%d %H:%M:%S UTC")
+    );
 
     println!("\n{}", "System Fingerprint:".bold());
     let fingerprint = &archive.manifest.system_fingerprint;
@@ -242,17 +321,37 @@ fn inspect_command(path: PathBuf, export_manifest: Option<PathBuf>, _verbose: bo
     println!("  {} {}", "Platform:".bold(), fingerprint.platform);
     println!("  {} {}", "Hostname:".bold(), fingerprint.hostname);
     println!("  {} {}", "Process ID:".bold(), fingerprint.process_id);
-    println!("  {} {}", "Timestamp:".bold(), fingerprint.timestamp.format("%Y-%m-%d %H:%M:%S UTC"));
+    println!(
+        "  {} {}",
+        "Timestamp:".bold(),
+        fingerprint.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
+    );
 
     println!("\n{}", "Cryptographic Information:".bold());
-    println!("  {} {}", "Root hash:".bold(), archive.manifest.bundle_root_hash);
-    println!("  {} {}...", "Signature:".bold(), &archive.manifest.signature[..32]);
-    println!("  {} {}...", "Public key:".bold(), &archive.manifest.verifier_public_key[..32]);
+    println!(
+        "  {} {}",
+        "Root hash:".bold(),
+        archive.manifest.bundle_root_hash
+    );
+    println!(
+        "  {} {}...",
+        "Signature:".bold(),
+        &archive.manifest.signature[..32]
+    );
+    println!(
+        "  {} {}...",
+        "Public key:".bold(),
+        &archive.manifest.verifier_public_key[..32]
+    );
 
     if let Some(export_path) = export_manifest {
         let manifest_json = serde_json::to_string_pretty(&archive.manifest)?;
         std::fs::write(&export_path, manifest_json)?;
-        println!("\n{} {}", "✓ Manifest exported to:".green(), export_path.display());
+        println!(
+            "\n{} {}",
+            "✓ Manifest exported to:".green(),
+            export_path.display()
+        );
     }
 
     Ok(())
@@ -261,8 +360,7 @@ fn inspect_command(path: PathBuf, export_manifest: Option<PathBuf>, _verbose: bo
 fn hash_command(path: PathBuf, _verbose: bool) -> Result<()> {
     use sha2::{Digest, Sha256};
 
-    let contents = std::fs::read(&path)
-        .context("Failed to read file")?;
+    let contents = std::fs::read(&path).context("Failed to read file")?;
 
     let mut hasher = Sha256::new();
     hasher.update(&contents);
@@ -274,11 +372,19 @@ fn hash_command(path: PathBuf, _verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn validate_cdna_command(path: PathBuf, generate_proof: bool, key_path: Option<PathBuf>, verbose: bool) -> Result<()> {
-    println!("{} {}", "🧬 Validating C-DNA schema:".bold().cyan(), path.display());
+fn validate_cdna_command(
+    path: PathBuf,
+    generate_proof: bool,
+    key_path: Option<PathBuf>,
+    _verbose: bool,
+) -> Result<()> {
+    println!(
+        "{} {}",
+        "🧬 Validating C-DNA schema:".bold().cyan(),
+        path.display()
+    );
 
-    let schema = CdnaSchema::from_file(&path)
-        .context("Failed to load C-DNA schema")?;
+    let schema = CdnaSchema::from_file(&path).context("Failed to load C-DNA schema")?;
 
     println!("{}", "✓ Schema is valid JSON".green());
     println!("  {} {}", "C-DNA version:".bold(), schema.c_dna_version);
@@ -292,15 +398,19 @@ fn validate_cdna_command(path: PathBuf, generate_proof: bool, key_path: Option<P
 
     if generate_proof {
         let key_path = key_path.context("--key is required when using --proof")?;
-        
-        let private_key = std::fs::read_to_string(&key_path)
-            .context("Failed to read private key")?;
+
+        let private_key =
+            std::fs::read_to_string(&key_path).context("Failed to read private key")?;
         let public_key_path = key_path.with_file_name("mkpe_public.key");
-        let public_key = std::fs::read_to_string(&public_key_path)
-            .context("Failed to read public key")?;
+        let public_key =
+            std::fs::read_to_string(&public_key_path).context("Failed to read public key")?;
 
         let key_id = uuid::Uuid::new_v4().to_string();
-        let keypair = KeyPair::new(private_key.trim().to_string(), public_key.trim().to_string(), key_id);
+        let keypair = KeyPair::new(
+            private_key.trim().to_string(),
+            public_key.trim().to_string(),
+            key_id,
+        );
 
         let proof = schema.create_proof(&keypair)?;
 
@@ -308,11 +418,71 @@ fn validate_cdna_command(path: PathBuf, generate_proof: bool, key_path: Option<P
         let proof_json = serde_json::to_string_pretty(&proof)?;
         std::fs::write(&proof_path, proof_json)?;
 
-        println!("\n{} {}", "✓ Proof generated:".green().bold(), proof_path.display());
+        println!(
+            "\n{} {}",
+            "✓ Proof generated:".green().bold(),
+            proof_path.display()
+        );
         println!("  {} {}", "Proof ID:".bold(), proof.proof_id);
     }
 
     Ok(())
+}
+
+fn dna_command(command: DnaCommands, verbose: bool) -> Result<()> {
+    match command {
+        DnaCommands::Create {
+            artifact,
+            key,
+            output,
+        } => {
+            let output_path = output.unwrap_or_else(|| default_dna_sidecar_path(&artifact));
+            let keypair = load_keypair(&key)?;
+            let archive = create_mkpe_bundle(&artifact, &keypair, &output_path)
+                .context("Failed to create MKPE DNA proof")?;
+            let stats = archive.stats();
+
+            println!("{}", "DNA proof created".green().bold());
+            println!("  {} {}", "Artifact:".bold(), artifact.display());
+            println!("  {} {}", "Sidecar:".bold(), output_path.display());
+            println!("  {} {}", "Byte proofs:".bold(), stats.total_proof_items);
+            println!("  {} {}", "Root hash:".bold(), stats.root_hash);
+            println!("  {} {}", "Manifest ID:".bold(), stats.manifest_id);
+        }
+        DnaCommands::Verify { artifact, bundle } => {
+            let archive = MkpeArchive::load(&bundle).context("Failed to load MKPE DNA proof")?;
+
+            match archive.verify_artifact(&artifact) {
+                Ok(report) => {
+                    println!("{}", "DNA verification PASSED".green().bold());
+                    println!("  {} {}", "Artifact:".bold(), artifact.display());
+                    println!("  {} {}", "Sidecar:".bold(), bundle.display());
+                    println!("  {} {}", "Verified proofs:".bold(), report.verified_proofs);
+                    println!("  {} {}", "Root hash:".bold(), report.root_hash);
+                }
+                Err(error) => {
+                    println!("{}", "DNA verification FAILED".red().bold());
+                    println!("  {} {}", "Artifact:".bold(), artifact.display());
+                    println!("  {} {}", "Sidecar:".bold(), bundle.display());
+                    println!("  {} {}", "Reason:".bold(), error);
+                    std::process::exit(1);
+                }
+            }
+        }
+        DnaCommands::Inspect { bundle } => {
+            inspect_command(bundle, None, verbose)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn default_dna_sidecar_path(artifact: &PathBuf) -> PathBuf {
+    if artifact.is_dir() {
+        return artifact.join(".mkpe");
+    }
+
+    artifact.with_extension("mkpe")
 }
 
 fn version_command() -> Result<()> {
@@ -328,4 +498,3 @@ fn version_command() -> Result<()> {
 
     Ok(())
 }
-

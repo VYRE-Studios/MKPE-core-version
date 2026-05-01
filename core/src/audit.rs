@@ -2,12 +2,12 @@
 //!
 //! Provides an append-only, structured log of all verification events.
 
-use crate::{Result, MkpeError};
+use crate::{MkpeError, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs::{OpenOptions, File};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use chrono::{DateTime, Utc};
 
 /// Types of audit events
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,12 +75,12 @@ impl AuditLog {
     /// Open or create an audit log at the specified path
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        
+
         // Ensure directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         Ok(Self { log_path: path })
     }
 
@@ -93,7 +93,7 @@ impl AuditLog {
 
         let json = serde_json::to_string(event)
             .map_err(|e| MkpeError::AuditError(format!("Serialization error: {}", e)))?;
-            
+
         writeln!(file, "{}", json)?;
         Ok(())
     }
@@ -104,7 +104,7 @@ impl AuditLog {
             AuditEventType::VerificationSuccess,
             Some(target.to_string()),
             "Verification succeeded".to_string(),
-            "INFO"
+            "INFO",
         ))
     }
 
@@ -114,7 +114,7 @@ impl AuditLog {
             AuditEventType::VerificationFailure,
             Some(target.to_string()),
             format!("Verification FAILED: {}", reason),
-            "CRITICAL"
+            "CRITICAL",
         ))
     }
 }
@@ -122,31 +122,31 @@ impl AuditLog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::BufRead;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_audit_log_creation() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let log = AuditLog::new(temp_file.path())?;
-        
+
         let event = AuditEvent::new(
             AuditEventType::SystemStart,
             None,
             "System started".to_string(),
-            "INFO"
+            "INFO",
         );
-        
+
         log.log(&event)?;
-        
-        let file = File::open(temp_file.path())?;
+
+        let file = std::fs::File::open(temp_file.path())?;
         let reader = std::io::BufReader::new(file);
         let line = reader.lines().next().unwrap()?;
-        
+
         let loaded: AuditEvent = serde_json::from_str(&line)?;
         assert_eq!(loaded.message, "System started");
         assert_eq!(loaded.event_type, AuditEventType::SystemStart);
-        
+
         Ok(())
     }
 
@@ -154,34 +154,34 @@ mod tests {
     fn test_audit_success() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let log = AuditLog::new(temp_file.path())?;
-        
+
         log.log_success("test.mkpe")?;
-        
-        let file = File::open(temp_file.path())?;
+
+        let file = std::fs::File::open(temp_file.path())?;
         let reader = std::io::BufReader::new(file);
         let line = reader.lines().next().unwrap()?;
-        
+
         let loaded: AuditEvent = serde_json::from_str(&line)?;
         assert_eq!(loaded.event_type, AuditEventType::VerificationSuccess);
-        
+
         Ok(())
     }
 
-     #[test]
+    #[test]
     fn test_audit_failure() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let log = AuditLog::new(temp_file.path())?;
-        
+
         log.log_failure("bad.mkpe", "Signature mismatch")?;
-        
-        let file = File::open(temp_file.path())?;
+
+        let file = std::fs::File::open(temp_file.path())?;
         let reader = std::io::BufReader::new(file);
         let line = reader.lines().next().unwrap()?;
-        
+
         let loaded: AuditEvent = serde_json::from_str(&line)?;
         assert_eq!(loaded.event_type, AuditEventType::VerificationFailure);
         assert_eq!(loaded.severity, "CRITICAL");
-        
+
         Ok(())
     }
 }

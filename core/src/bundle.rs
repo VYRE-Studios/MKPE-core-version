@@ -7,11 +7,14 @@
 //! - Ed25519 signature block
 //! - 8-byte footer with reverse magic and CRC32
 
-use crate::{Manifest, MkpeError, ProofBundle, Result};
+use crate::{Manifest, MkpeError, ProofBundle, ProofItem, Result};
+use base64::{engine::general_purpose, Engine as _};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// State marker for an unverified archive
 #[derive(Debug, Clone)]
@@ -174,6 +177,14 @@ pub struct MkpeArchive {
     pub format_version: String,
 }
 
+/// Result of verifying current artifact bytes against an MKPE sidecar bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactVerificationReport {
+    pub verified_proofs: usize,
+    pub root_hash: String,
+    pub manifest_id: String,
+}
+
 impl MkpeArchive {
     /// Create a new MKPE archive
     pub fn new(manifest: Manifest, bundles: Vec<ProofBundle>) -> Self {
@@ -192,7 +203,7 @@ impl MkpeArchive {
         // Section 1: Serialize manifest to canonical JSON (no extra whitespace)
         let manifest_json = serde_json::to_vec(&self.manifest)?;
 
-        // Section 2: Serialize proof data (binary Merkle tree)
+        // Section 2: Serialize proof data with full metadata
         let proof_data = self.serialize_proof_section()?;
 
         // Section 3: Create signature block
@@ -209,61 +220,35 @@ impl MkpeArchive {
         let header_bytes = header.to_bytes();
 
         // Calculate CRC32 for footer - FULL FILE INTEGRITY (v2)
-        let crc32 = calculate_crc32(&[
-            &header_bytes,
-            &manifest_json,
-            &proof_data,
-            &signature_block
-        ]);
+        let crc32 =
+            calculate_crc32(&[&header_bytes, &manifest_json, &proof_data, &signature_block]);
 
         // Create footer
         let footer = MkpeFooter::new(crc32);
         let footer_bytes = footer.to_bytes();
 
         // Write everything in order
-        file.write_all(&header_bytes)?;           // 32 bytes
-        file.write_all(&manifest_json)?;          // Variable
-        file.write_all(&proof_data)?;             // Variable
-        file.write_all(&signature_block)?;        // Variable
-        file.write_all(&footer_bytes)?;           // 8 bytes
+        file.write_all(&header_bytes)?; // 32 bytes
+        file.write_all(&manifest_json)?; // Variable
+        file.write_all(&proof_data)?; // Variable
+        file.write_all(&signature_block)?; // Variable
+        file.write_all(&footer_bytes)?; // 8 bytes
 
         Ok(())
     }
 
-    /// Serialize proof section as binary Merkle tree
+    /// Serialize proof section with full proof metadata.
     fn serialize_proof_section(&self) -> Result<Vec<u8>> {
-        let mut data = Vec::new();
-
-        // Write count of proof items
-        let total_proofs: u32 = self.bundles.iter()
-            .map(|b| b.proofs.len() as u32)
-            .sum();
-        data.extend_from_slice(&total_proofs.to_le_bytes());
-
-        // Write each proof hash (32 bytes each)
-        for bundle in &self.bundles {
-            for proof in &bundle.proofs {
-                // Decode hex hash to binary
-                let hash_bytes = hex::decode(&proof.content_hash)
-                    .map_err(|e| MkpeError::BundleError(format!("Invalid hash: {}", e)))?;
-                
-                if hash_bytes.len() != 32 {
-                    return Err(MkpeError::BundleError(
-                        "Hash must be 32 bytes (SHA-256)".to_string(),
-                    ));
-                }
-                
-                data.extend_from_slice(&hash_bytes);
-            }
-        }
-
-        Ok(data)
+        serde_json::to_vec(&self.bundles).map_err(MkpeError::from)
     }
 
     /// Create signature block (public key + signature)
-    fn create_signature_block(&self, manifest: &[u8], proof_data: &[u8], keypair: &crate::crypto::KeyPair) -> Result<Vec<u8>> {
-        use sha2::{Digest, Sha256};
-
+    fn create_signature_block(
+        &self,
+        manifest: &[u8],
+        proof_data: &[u8],
+        keypair: &crate::crypto::KeyPair,
+    ) -> Result<Vec<u8>> {
         // Calculate SHA256 of all data to be signed
         let mut hasher = Sha256::new();
         hasher.update(manifest);
@@ -276,7 +261,6 @@ impl MkpeArchive {
         let mut signature_block = Vec::new();
 
         // Decode public key from base64
-        use base64::{engine::general_purpose, Engine as _};
         let public_key_bytes = general_purpose::STANDARD
             .decode(&keypair.public_key)
             .map_err(|e| MkpeError::BundleError(format!("Invalid public key: {}", e)))?;
@@ -319,9 +303,10 @@ impl MkpeArchive {
         // Verify version
         // Verify version
         if header.version != FORMAT_VERSION && header.version != FORMAT_VERSION_V1 {
-            return Err(MkpeError::BundleError(
-                format!("Unsupported format version: {}", header.version),
-            ));
+            return Err(MkpeError::BundleError(format!(
+                "Unsupported format version: {}",
+                header.version
+            )));
         }
 
         // Read manifest section
@@ -351,7 +336,7 @@ impl MkpeArchive {
                 &header_bytes,
                 &manifest_bytes,
                 &proof_bytes,
-                &signature_bytes
+                &signature_bytes,
             ])
         };
         if calculated_crc != footer.crc32 {
@@ -377,32 +362,38 @@ impl MkpeArchive {
         })
     }
 
-    /// Deserialize binary proof section
+    /// Deserialize proof section, supporting current metadata JSON and legacy hash-only data.
     fn deserialize_proof_section(data: &[u8], manifest: &Manifest) -> Result<Vec<ProofBundle>> {
         if data.len() < 4 {
             return Ok(Vec::new());
         }
 
+        if let Ok(bundles) = serde_json::from_slice::<Vec<ProofBundle>>(data) {
+            return Ok(bundles);
+        }
+
         // Read count
         let count = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        
+
         // Each hash is 32 bytes
         let expected_size = 4 + (count * 32);
         if data.len() != expected_size {
-            return Err(MkpeError::BundleError(
-                format!("Proof section size mismatch: expected {}, got {}", expected_size, data.len()),
-            ));
+            return Err(MkpeError::BundleError(format!(
+                "Proof section size mismatch: expected {}, got {}",
+                expected_size,
+                data.len()
+            )));
         }
 
         // For now, create a single bundle with all proofs
         // (In a full implementation, you'd reconstruct the original bundle structure)
         let mut proofs = Vec::new();
-        
+
         for i in 0..count {
             let offset = 4 + (i * 32);
             let hash_bytes = &data[offset..offset + 32];
             let hash_hex = hex::encode(hash_bytes);
-            
+
             // Create a proof item (note: path and other metadata lost in binary format)
             // In production, you'd store this metadata separately
             let proof = crate::proof::ProofItem {
@@ -413,7 +404,7 @@ impl MkpeArchive {
                 signature: String::new(),
                 metadata: std::collections::HashMap::new(),
             };
-            
+
             proofs.push(proof);
         }
 
@@ -442,8 +433,6 @@ impl MkpeArchive {
         signature_block: &[u8],
         _manifest_obj: &Manifest,
     ) -> Result<()> {
-        use sha2::{Digest, Sha256};
-
         if signature_block.len() != 96 {
             return Err(MkpeError::BundleError(
                 "Invalid signature block size".to_string(),
@@ -461,16 +450,14 @@ impl MkpeArchive {
         let data_hash = hasher.finalize();
 
         // Verify Ed25519 signature
-        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-        
         let verifying_key = VerifyingKey::from_bytes(public_key_bytes.try_into().unwrap())
             .map_err(|e| MkpeError::BundleError(format!("Invalid public key: {}", e)))?;
-        
+
         let signature = Signature::from_bytes(signature_bytes.try_into().unwrap());
-        
-        verifying_key
-            .verify(&data_hash, &signature)
-            .map_err(|_| MkpeError::VerificationFailed("Signature verification failed".to_string()))?;
+
+        verifying_key.verify(&data_hash, &signature).map_err(|_| {
+            MkpeError::VerificationFailed("Signature verification failed".to_string())
+        })?;
 
         Ok(())
     }
@@ -481,26 +468,30 @@ impl MkpeArchive {
     pub fn verify(self) -> Result<VerifiedMkpeArchive> {
         // The bundle signature was already verified in load()
         // Here we verify the inner manifest signature and consistency
-        
+
         // 1. Verify Manifest Inner Signature
         if !self.manifest.verify()? {
-             return Err(MkpeError::VerificationFailed("Inner manifest signature invalid".into()));
+            return Err(MkpeError::VerificationFailed(
+                "Inner manifest signature invalid".into(),
+            ));
         }
-        
+
         // Verify manifest data is consistent
         let total_proofs: usize = self.bundles.iter().map(|b| b.proofs.len()).sum();
         if self.manifest.proof_count != total_proofs {
-             return Err(MkpeError::VerificationFailed(format!("Proof count mismatch: manifest says {}, found {}", self.manifest.proof_count, total_proofs)));
+            return Err(MkpeError::VerificationFailed(format!(
+                "Proof count mismatch: manifest says {}, found {}",
+                self.manifest.proof_count, total_proofs
+            )));
         }
 
         // Verify root hash matches bundles
-        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         for bundle in &self.bundles {
             // Monotonicity Check: Bundle timestamp cannot be older than proofs
             for proof in &bundle.proofs {
                 if proof.timestamp > bundle.timestamp {
-                     return Err(MkpeError::VerificationFailed(format!(
+                    return Err(MkpeError::VerificationFailed(format!(
                         "Invariant Violation: Time Travel Detected. Proof {} ({}) is newer than its container bundle ({})",
                         proof.id, proof.timestamp, bundle.timestamp
                     )));
@@ -509,9 +500,9 @@ impl MkpeArchive {
             }
         }
         let calculated_root = hex::encode(hasher.finalize());
-        
+
         if calculated_root != self.manifest.bundle_root_hash {
-             return Err(MkpeError::VerificationFailed("Root hash mismatch".into()));
+            return Err(MkpeError::VerificationFailed("Root hash mismatch".into()));
         }
 
         Ok(VerifiedMkpeArchive(self))
@@ -520,7 +511,7 @@ impl MkpeArchive {
     /// Get archive statistics
     pub fn stats(&self) -> ArchiveStats {
         let total_proofs: usize = self.bundles.iter().map(|b| b.proofs.len()).sum();
-        
+
         ArchiveStats {
             bundle_count: self.bundles.len(),
             total_proof_items: total_proofs,
@@ -528,6 +519,37 @@ impl MkpeArchive {
             manifest_id: self.manifest.manifest_id.clone(),
             root_hash: self.manifest.bundle_root_hash.clone(),
         }
+    }
+
+    /// Verify current file or folder bytes against this signed MKPE proof bundle.
+    pub fn verify_artifact<P: AsRef<Path>>(
+        &self,
+        artifact_path: P,
+    ) -> Result<ArtifactVerificationReport> {
+        self.clone().verify()?;
+
+        let artifact_path = artifact_path.as_ref();
+        for bundle in &self.bundles {
+            for proof in &bundle.proofs {
+                let current_path = resolve_proof_path(artifact_path, proof);
+                if !crate::proof::verify_proof_item(
+                    proof,
+                    &current_path,
+                    &self.manifest.verifier_public_key,
+                )? {
+                    return Err(MkpeError::VerificationFailed(format!(
+                        "Artifact bytes do not match MKPE proof for {}",
+                        proof.path.display()
+                    )));
+                }
+            }
+        }
+
+        Ok(ArtifactVerificationReport {
+            verified_proofs: self.bundles.iter().map(|bundle| bundle.proofs.len()).sum(),
+            root_hash: self.manifest.bundle_root_hash.clone(),
+            manifest_id: self.manifest.manifest_id.clone(),
+        })
     }
 }
 
@@ -544,16 +566,16 @@ pub struct ArchiveStats {
 /// Calculate CRC32 checksum
 fn calculate_crc32(data_slices: &[&[u8]]) -> u32 {
     const CRC32_TABLE: [u32; 256] = generate_crc32_table();
-    
+
     let mut crc: u32 = 0xFFFF_FFFF;
-    
+
     for data in data_slices {
         for &byte in *data {
             let index = ((crc ^ byte as u32) & 0xFF) as usize;
             crc = (crc >> 8) ^ CRC32_TABLE[index];
         }
     }
-    
+
     !crc
 }
 
@@ -561,11 +583,11 @@ fn calculate_crc32(data_slices: &[&[u8]]) -> u32 {
 const fn generate_crc32_table() -> [u32; 256] {
     let mut table = [0u32; 256];
     let mut i = 0;
-    
+
     while i < 256 {
         let mut crc = i as u32;
         let mut j = 0;
-        
+
         while j < 8 {
             if crc & 1 == 1 {
                 crc = (crc >> 1) ^ 0xEDB8_8320;
@@ -574,11 +596,11 @@ const fn generate_crc32_table() -> [u32; 256] {
             }
             j += 1;
         }
-        
+
         table[i] = crc;
         i += 1;
     }
-    
+
     table
 }
 
@@ -589,11 +611,11 @@ pub fn create_mkpe_bundle<P: AsRef<Path>>(
     output_path: P,
 ) -> Result<MkpeArchive> {
     // Create recursive proofs
-    let proofs = crate::proof::create_recursive_proofs(&dir_path, keypair)?;
-    
+    let proofs = create_artifact_proofs(dir_path.as_ref(), keypair)?;
+
     // Create proof bundle
     let bundle = crate::proof::create_proof_bundle(proofs, keypair, None)?;
-    
+
     // Create manifest
     let mut manifest = Manifest::new(
         bundle.root_hash.clone(),
@@ -602,14 +624,60 @@ pub fn create_mkpe_bundle<P: AsRef<Path>>(
         None,
     );
     manifest.sign(keypair)?;
-    
+
     // Create archive
     let archive = MkpeArchive::new(manifest, vec![bundle]);
-    
+
     // Save to file with keypair for bundle signature
     archive.save(output_path, keypair)?;
-    
+
     Ok(archive)
+}
+
+fn create_artifact_proofs(path: &Path, keypair: &crate::crypto::KeyPair) -> Result<Vec<ProofItem>> {
+    if path.is_file() {
+        let mut proof = crate::proof::create_proof_item(path, keypair)?;
+        proof.path = path
+            .file_name()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| path.to_path_buf());
+        return Ok(vec![proof]);
+    }
+
+    let mut proofs = Vec::new();
+    collect_artifact_proofs(path, path, keypair, &mut proofs)?;
+    proofs.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(proofs)
+}
+
+fn collect_artifact_proofs(
+    root: &Path,
+    dir: &Path,
+    keypair: &crate::crypto::KeyPair,
+    proofs: &mut Vec<ProofItem>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_artifact_proofs(root, &path, keypair, proofs)?;
+            continue;
+        }
+
+        let mut proof = crate::proof::create_proof_item(&path, keypair)?;
+        proof.path = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        proofs.push(proof);
+    }
+
+    Ok(())
+}
+
+fn resolve_proof_path(artifact_path: &Path, proof: &ProofItem) -> PathBuf {
+    if artifact_path.is_file() {
+        return artifact_path.to_path_buf();
+    }
+
+    artifact_path.join(&proof.path)
 }
 
 #[cfg(test)]
@@ -642,6 +710,30 @@ mod tests {
     }
 
     #[test]
+    fn test_mkpe_archive_preserves_proof_metadata_on_load() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let file_path = temp_dir.path().join("lineage.txt");
+        std::fs::write(&file_path, b"Every byte carries provenance")?;
+
+        let archive_path = temp_dir.path().join("lineage.mkpe");
+        let archive = create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
+        let loaded = MkpeArchive::load(&archive_path)?;
+
+        let original_proof = &archive.bundles[0].proofs[0];
+        let loaded_proof = &loaded.bundles[0].proofs[0];
+
+        assert_eq!(loaded.bundles[0].bundle_id, archive.bundles[0].bundle_id);
+        assert_eq!(loaded.bundles[0].signature, archive.bundles[0].signature);
+        assert_eq!(loaded_proof.id, original_proof.id);
+        assert_eq!(loaded_proof.path, original_proof.path);
+        assert_eq!(loaded_proof.signature, original_proof.signature);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_mkpe_archive_verification() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let keypair = crate::crypto::generate_keypair();
@@ -654,6 +746,29 @@ mod tests {
 
         let is_valid = archive.verify().is_ok();
         assert!(is_valid);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_verify_artifact_detects_modified_file_bytes() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let file_path = temp_dir.path().join("asset.txt");
+        std::fs::write(&file_path, b"original byte dna")?;
+
+        let archive_path = temp_dir.path().join("asset.mkpe");
+        create_mkpe_bundle(&file_path, &keypair, &archive_path)?;
+
+        let archive = MkpeArchive::load(&archive_path)?;
+        let report = archive.verify_artifact(&file_path)?;
+        assert_eq!(report.verified_proofs, 1);
+
+        std::fs::write(&file_path, b"tampered byte dna")?;
+
+        let tampered = archive.verify_artifact(&file_path);
+        assert!(tampered.is_err());
 
         Ok(())
     }
@@ -679,4 +794,3 @@ mod tests {
         Ok(())
     }
 }
-

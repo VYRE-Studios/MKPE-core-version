@@ -5,9 +5,10 @@
 use anyhow::Result;
 use chrono::Utc;
 use log::{error, info, warn};
-use morse_kirby_core::{AuditLog, AuditEvent, AuditEventType};
+use morse_kirby_core::{
+    create_mkpe_bundle, AuditEvent, AuditEventType, AuditLog, KeyPair, MkpeArchive,
+};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -30,6 +31,8 @@ struct ServiceConfig {
     interval_seconds: u64,
     log_dir: PathBuf,
     skip_extensions: Vec<String>,
+    key_path: Option<PathBuf>,
+    auto_create_missing_proofs: bool,
 }
 
 impl Default for ServiceConfig {
@@ -39,13 +42,17 @@ impl Default for ServiceConfig {
             interval_seconds: 900, // 15 minutes
             log_dir: PathBuf::from("C:\\ProgramData\\MKPE\\logs"),
             skip_extensions: vec![".tmp".to_string(), ".log".to_string(), ".cache".to_string()],
+            key_path: Some(PathBuf::from(
+                "C:\\ProgramData\\MKPE\\keys\\mkpe_private.key",
+            )),
+            auto_create_missing_proofs: true,
         }
     }
 }
 
 fn load_config() -> ServiceConfig {
     let config_path = PathBuf::from("C:\\ProgramData\\MKPE\\config.json");
-    
+
     if config_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
             if let Ok(full_config) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -86,11 +93,25 @@ fn load_config() -> ServiceConfig {
                         })
                         .unwrap_or_default();
 
+                    let key_path = full_config
+                        .get("signing")
+                        .and_then(|v| v.get("key_path"))
+                        .and_then(|v| v.as_str())
+                        .map(PathBuf::from);
+
+                    let auto_create_missing_proofs = full_config
+                        .get("service_config")
+                        .and_then(|v| v.get("auto_create_missing_proofs"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+
                     return ServiceConfig {
                         watch_paths,
                         interval_seconds,
                         log_dir,
                         skip_extensions,
+                        key_path,
+                        auto_create_missing_proofs,
                     };
                 }
             }
@@ -100,18 +121,121 @@ fn load_config() -> ServiceConfig {
     ServiceConfig::default()
 }
 
-fn hash_file(path: &Path) -> Result<String> {
-    let contents = std::fs::read(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&contents);
-    Ok(hex::encode(hasher.finalize()))
+fn load_service_keypair(config: &ServiceConfig) -> Option<KeyPair> {
+    let key_path = config.key_path.as_ref()?;
+    let private_key = std::fs::read_to_string(key_path).ok()?;
+    let public_key_path = key_path.with_file_name("mkpe_public.key");
+    let public_key = std::fs::read_to_string(public_key_path).ok()?;
+
+    Some(KeyPair::new(
+        private_key.trim().to_string(),
+        public_key.trim().to_string(),
+        "service".to_string(),
+    ))
 }
 
-fn run_verification_scan(config: &ServiceConfig, running: &std::sync::Arc<std::sync::atomic::AtomicBool>) {
+fn should_skip_file(path: &Path, config: &ServiceConfig) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("mkpe") {
+        return true;
+    }
+
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| {
+            config
+                .skip_extensions
+                .iter()
+                .any(|skip| skip == &format!(".{}", ext))
+        })
+        .unwrap_or(false)
+}
+
+fn sidecar_path_for(path: &Path) -> PathBuf {
+    path.with_extension("mkpe")
+}
+
+fn verify_or_create_sidecar(
+    path: &Path,
+    config: &ServiceConfig,
+    audit_log: &AuditLog,
+    keypair: Option<&KeyPair>,
+) -> bool {
+    let sidecar_path = sidecar_path_for(path);
+
+    if sidecar_path.exists() {
+        match MkpeArchive::load(&sidecar_path).and_then(|archive| archive.verify_artifact(path)) {
+            Ok(report) => {
+                let _ = audit_log.log(&AuditEvent::new(
+                    AuditEventType::VerificationSuccess,
+                    Some(path.to_string_lossy().to_string()),
+                    format!(
+                        "DNA proof verified. Sidecar: {}, proofs: {}, root: {}",
+                        sidecar_path.display(),
+                        report.verified_proofs,
+                        report.root_hash
+                    ),
+                    "INFO",
+                ));
+                true
+            }
+            Err(error) => {
+                let _ = audit_log.log_failure(
+                    path.to_str().unwrap_or(""),
+                    &format!("DNA proof mismatch: {}", error),
+                );
+                false
+            }
+        }
+    } else if config.auto_create_missing_proofs {
+        match keypair {
+            Some(keypair) => match create_mkpe_bundle(path, keypair, sidecar_path.as_path()) {
+                Ok(archive) => {
+                    let _ = audit_log.log(&AuditEvent::new(
+                        AuditEventType::BundleCreated,
+                        Some(path.to_string_lossy().to_string()),
+                        format!(
+                            "DNA sidecar created at {} with root {}",
+                            sidecar_path.display(),
+                            archive.manifest.bundle_root_hash
+                        ),
+                        "INFO",
+                    ));
+                    true
+                }
+                Err(error) => {
+                    let _ = audit_log.log_failure(
+                        path.to_str().unwrap_or(""),
+                        &format!("Failed to create DNA sidecar: {}", error),
+                    );
+                    false
+                }
+            },
+            None => {
+                let _ = audit_log.log_failure(
+                    path.to_str().unwrap_or(""),
+                    "Missing MKPE DNA sidecar and no service signing key configured",
+                );
+                false
+            }
+        }
+    } else {
+        let _ = audit_log.log_failure(path.to_str().unwrap_or(""), "Missing MKPE DNA sidecar");
+        false
+    }
+}
+
+fn run_verification_scan(
+    config: &ServiceConfig,
+    running: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     info!("Starting verification scan");
-    
+
     // Initialize audit log
-    let audit_log = match AuditLog::new(config.log_dir.join(format!("audit_{}.jsonl", Utc::now().format("%Y-%m-%d")))) {
+    let audit_log = match AuditLog::new(
+        config
+            .log_dir
+            .join(format!("audit_{}.jsonl", Utc::now().format("%Y-%m-%d"))),
+    ) {
         Ok(log) => log,
         Err(e) => {
             error!("Failed to initialize audit log: {}", e);
@@ -123,18 +247,19 @@ fn run_verification_scan(config: &ServiceConfig, running: &std::sync::Arc<std::s
         AuditEventType::VerificationSuccess,
         Some("system".to_string()),
         "Verification scan initiated".to_string(),
-        "INFO"
+        "INFO",
     ));
 
     let mut total_checked = 0;
     let mut errors = 0;
+    let service_keypair = load_service_keypair(config);
 
     for watch_path in &config.watch_paths {
         if !watch_path.exists() {
             warn!("Watch path does not exist: {:?}", watch_path);
             let _ = audit_log.log_failure(
                 watch_path.to_str().unwrap_or("unknown"),
-                "Watch path does not exist"
+                "Watch path does not exist",
             );
             errors += 1;
             continue;
@@ -152,36 +277,14 @@ fn run_verification_scan(config: &ServiceConfig, running: &std::sync::Arc<std::s
             }
 
             let path = entry.path();
-            
-            // Skip based on extension
-            if let Some(ext) = path.extension() {
-                if let Some(ext_str) = ext.to_str() {
-                    if config.skip_extensions.iter().any(|skip| skip == &format!(".{}", ext_str)) {
-                        continue;
-                    }
-                }
+
+            if should_skip_file(path, config) {
+                continue;
             }
 
-            match hash_file(path) {
-                Ok(_hash) => {
-                    // Only log failures or critical events to avoid spamming the audit log with "Success"
-                    // for every single file every 15 minutes.
-                    // But for this "Proof it Works" phase, we'll log every 100th success or valid MKPE files.
-                    if let Some(ext) = path.extension() {
-                        if ext == "mkpe" {
-                             let _ = audit_log.log_success(path.to_str().unwrap_or(""));
-                        }
-                    }
-                    total_checked += 1;
-                }
-                Err(e) => {
-                    error!("Error hashing {:?}: {}", path, e);
-                     let _ = audit_log.log_failure(
-                        path.to_str().unwrap_or(""),
-                        &format!("Hashing error: {}", e)
-                    );
-                    errors += 1;
-                }
+            total_checked += 1;
+            if !verify_or_create_sidecar(path, config, &audit_log, service_keypair.as_ref()) {
+                errors += 1;
             }
         }
     }
@@ -189,11 +292,17 @@ fn run_verification_scan(config: &ServiceConfig, running: &std::sync::Arc<std::s
     let _ = audit_log.log(&AuditEvent::new(
         AuditEventType::VerificationSuccess,
         Some("system".to_string()),
-        format!("Scan complete. Checked: {}, Errors: {}", total_checked, errors),
-        "INFO"
+        format!(
+            "Scan complete. Checked: {}, Errors: {}",
+            total_checked, errors
+        ),
+        "INFO",
     ));
-    
-    info!("Verification scan complete: {} files checked, {} errors", total_checked, errors);
+
+    info!(
+        "Verification scan complete: {} files checked, {} errors",
+        total_checked, errors
+    );
 }
 
 fn service_main(_arguments: Vec<OsString>) {
@@ -243,11 +352,11 @@ fn service_main(_arguments: Vec<OsString>) {
     // Main service loop
     let loop_running = running.clone();
     let loop_config = config.clone();
-    
+
     thread::spawn(move || {
         while loop_running.load(std::sync::atomic::Ordering::Relaxed) {
             run_verification_scan(&loop_config, &loop_running);
-            
+
             // Sleep in small intervals so we can respond to shutdown quickly
             for _ in 0..loop_config.interval_seconds {
                 if !loop_running.load(std::sync::atomic::Ordering::Relaxed) {
@@ -283,24 +392,24 @@ fn main() -> Result<()> {
     if let Err(e) = service_dispatcher::start("MKPEIntegrityService", ffi_service_main) {
         // If not running as service, run in console mode for testing
         eprintln!("Failed to start as service, running in console mode: {}", e);
-        
+
         env_logger::init();
         info!("Running in console mode");
-        
+
         let config = load_config();
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        
+
         // Set up Ctrl+C handler
         let running_clone = running.clone();
         ctrlc::set_handler(move || {
             info!("Ctrl+C received, shutting down");
             running_clone.store(false, std::sync::atomic::Ordering::Relaxed);
         })?;
-        
+
         // Run verification loop
         while running.load(std::sync::atomic::Ordering::Relaxed) {
             run_verification_scan(&config, &running);
-            
+
             for _ in 0..config.interval_seconds {
                 if !running.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
@@ -308,12 +417,9 @@ fn main() -> Result<()> {
                 thread::sleep(Duration::from_secs(1));
             }
         }
-        
+
         info!("Service exiting");
     }
 
     Ok(())
 }
-
-
-
