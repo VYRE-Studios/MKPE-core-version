@@ -52,6 +52,7 @@ impl Default for ServiceConfig {
 
 fn load_config() -> ServiceConfig {
     let config_path = PathBuf::from("C:\\ProgramData\\MKPE\\config.json");
+    let defaults = ServiceConfig::default();
 
     if config_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
@@ -66,7 +67,7 @@ fn load_config() -> ServiceConfig {
                                 .filter_map(|v| v.as_str().map(PathBuf::from))
                                 .collect()
                         })
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| defaults.watch_paths.clone());
 
                     let interval_seconds = service_config
                         .get("interval_seconds")
@@ -91,13 +92,14 @@ fn load_config() -> ServiceConfig {
                                 .filter_map(|v| v.as_str().map(String::from))
                                 .collect()
                         })
-                        .unwrap_or_default();
+                        .unwrap_or_else(|| defaults.skip_extensions.clone());
 
                     let key_path = full_config
                         .get("signing")
                         .and_then(|v| v.get("key_path"))
                         .and_then(|v| v.as_str())
-                        .map(PathBuf::from);
+                        .map(PathBuf::from)
+                        .or_else(|| defaults.key_path.clone());
 
                     let auto_create_missing_proofs = full_config
                         .get("service_config")
