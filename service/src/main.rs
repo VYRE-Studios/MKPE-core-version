@@ -143,15 +143,8 @@ fn should_skip_file(path: &Path, config: &ServiceConfig) -> bool {
         return true;
     }
 
-    if path.extension().and_then(|ext| ext.to_str()) == Some("mkpe") {
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            return true;
-        };
-        if let Some(original_name) = file_name.strip_suffix(".mkpe") {
-            if path.with_file_name(original_name).exists() {
-                return true;
-            }
-        }
+    if is_trusted_sidecar_for_sibling(path, config) {
+        return true;
     }
 
     path.extension()
@@ -167,6 +160,34 @@ fn should_skip_file(path: &Path, config: &ServiceConfig) -> bool {
 
 fn sidecar_path_for(path: &Path) -> PathBuf {
     default_sidecar_path(path)
+}
+
+fn is_trusted_sidecar_for_sibling(path: &Path, config: &ServiceConfig) -> bool {
+    if path.extension().and_then(|ext| ext.to_str()) != Some("mkpe") {
+        return false;
+    }
+
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(sibling_name) = file_name.strip_suffix(".mkpe") else {
+        return false;
+    };
+
+    let sibling_path = path.with_file_name(sibling_name);
+    if !sibling_path.exists() || default_sidecar_path(&sibling_path) != path {
+        return false;
+    }
+
+    let Some(keypair) = load_service_keypair(config) else {
+        return false;
+    };
+
+    MkpeArchive::load(path)
+        .and_then(|archive| {
+            archive.verify_artifact_with_public_key(&sibling_path, &keypair.public_key)
+        })
+        .is_ok()
 }
 
 fn audit_event(audit_log: &AuditLog, event: &AuditEvent) -> bool {
@@ -198,7 +219,18 @@ fn verify_or_create_sidecar(
     let sidecar_path = sidecar_path_for(path);
 
     if sidecar_path.exists() {
-        match MkpeArchive::load(&sidecar_path).and_then(|archive| archive.verify_artifact(path)) {
+        let Some(keypair) = keypair else {
+            audit_failure(
+                audit_log,
+                path.to_str().unwrap_or(""),
+                "Existing MKPE DNA sidecar cannot be trusted without a configured service public key",
+            );
+            return false;
+        };
+
+        match MkpeArchive::load(&sidecar_path)
+            .and_then(|archive| archive.verify_artifact_with_public_key(path, &keypair.public_key))
+        {
             Ok(report) => audit_event(
                 audit_log,
                 &AuditEvent::new(
@@ -399,16 +431,26 @@ mod tests {
     #[test]
     fn test_should_skip_only_recognized_sidecars_not_mkpe_payloads() {
         let temp_dir = TempDir::new().unwrap();
-        let config = ServiceConfig::default();
+        let keypair = generate_keypair();
+        let private_key_path = temp_dir.path().join("mkpe_private.key");
+        let public_key_path = temp_dir.path().join("mkpe_public.key");
+        std::fs::write(&private_key_path, &keypair.private_key).unwrap();
+        std::fs::write(&public_key_path, &keypair.public_key).unwrap();
+        let config = ServiceConfig {
+            key_path: Some(private_key_path),
+            ..ServiceConfig::default()
+        };
 
         let payload = temp_dir.path().join("payload.mkpe");
+        let sibling = temp_dir.path().join("payload");
+        std::fs::write(&sibling, b"sibling bytes").unwrap();
         std::fs::write(&payload, b"payload bytes").unwrap();
         assert!(!should_skip_file(&payload, &config));
 
         let artifact = temp_dir.path().join("report.txt");
         let sidecar = temp_dir.path().join("report.txt.mkpe");
         std::fs::write(&artifact, b"report bytes").unwrap();
-        std::fs::write(&sidecar, b"sidecar bytes").unwrap();
+        create_mkpe_bundle(&artifact, &keypair, &sidecar).unwrap();
         assert!(should_skip_file(&sidecar, &config));
     }
 
@@ -470,6 +512,67 @@ mod tests {
             .unwrap()
             .verify_artifact(&pdf)
             .unwrap();
+    }
+
+    #[test]
+    fn test_existing_sidecar_requires_service_trusted_signer() {
+        let temp_dir = TempDir::new().unwrap();
+        let trusted_keypair = generate_keypair();
+        let attacker_keypair = generate_keypair();
+
+        let private_key_path = temp_dir.path().join("mkpe_private.key");
+        let public_key_path = temp_dir.path().join("mkpe_public.key");
+        std::fs::write(&private_key_path, &trusted_keypair.private_key).unwrap();
+        std::fs::write(&public_key_path, &trusted_keypair.public_key).unwrap();
+
+        let artifact = temp_dir.path().join("asset.txt");
+        std::fs::write(&artifact, b"attacker supplied bytes").unwrap();
+        let sidecar = sidecar_path_for(&artifact);
+        create_mkpe_bundle(&artifact, &attacker_keypair, &sidecar).unwrap();
+
+        let log_dir = temp_dir.path().join("logs");
+        let config = ServiceConfig {
+            watch_paths: vec![temp_dir.path().to_path_buf()],
+            interval_seconds: 1,
+            log_dir: log_dir.clone(),
+            skip_extensions: Vec::new(),
+            key_path: Some(private_key_path),
+            auto_create_missing_proofs: false,
+        };
+        let audit_log = AuditLog::new(log_dir.join("audit.jsonl")).unwrap();
+
+        assert!(!verify_or_create_sidecar(
+            &artifact,
+            &config,
+            &audit_log,
+            Some(&trusted_keypair)
+        ));
+    }
+
+    #[test]
+    fn test_existing_sidecar_fails_closed_without_service_trust_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let keypair = generate_keypair();
+
+        let artifact = temp_dir.path().join("asset.txt");
+        std::fs::write(&artifact, b"trusted bytes").unwrap();
+        let sidecar = sidecar_path_for(&artifact);
+        create_mkpe_bundle(&artifact, &keypair, &sidecar).unwrap();
+
+        let log_dir = temp_dir.path().join("logs");
+        let config = ServiceConfig {
+            watch_paths: vec![temp_dir.path().to_path_buf()],
+            interval_seconds: 1,
+            log_dir: log_dir.clone(),
+            skip_extensions: Vec::new(),
+            key_path: None,
+            auto_create_missing_proofs: false,
+        };
+        let audit_log = AuditLog::new(log_dir.join("audit.jsonl")).unwrap();
+
+        assert!(!verify_or_create_sidecar(
+            &artifact, &config, &audit_log, None
+        ));
     }
 }
 

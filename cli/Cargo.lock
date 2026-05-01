@@ -473,7 +473,7 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
 name = "mkpe"
-version = "1.0.1-mkpe"
+version = "1.0.2-mkpe"
 dependencies = [
  "anyhow",
  "chrono",
@@ -493,7 +493,7 @@ dependencies = [
 
 [[package]]
 name = "morse_kirby_core"
-version = "1.0.1-mkpe"
+version = "1.0.2-mkpe"
 dependencies = [
  "base64",
  "chrono",

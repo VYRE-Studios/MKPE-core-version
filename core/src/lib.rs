@@ -40,7 +40,7 @@ pub use proof::{
 };
 
 /// MKPE version constant
-pub const MKPE_VERSION: &str = "1.0.1-mkpe";
+pub const MKPE_VERSION: &str = "1.0.2-mkpe";
 
 /// MKPE schema version
 pub const SCHEMA_VERSION: &str = "1.0.0";

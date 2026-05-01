@@ -1,6 +1,6 @@
 [package]
 name = "mkpe_service"
-version = "1.0.1-mkpe"
+version = "1.0.2-mkpe"
 edition = "2021"
 authors = ["Morse-Kirby Provenance Engine"]
 description = "MKPE background integrity verification service"

@@ -689,6 +689,8 @@ pub fn create_mkpe_bundle<P: AsRef<Path>>(
     keypair: &crate::crypto::KeyPair,
     output_path: P,
 ) -> Result<MkpeArchive> {
+    validate_bundle_output_path(dir_path.as_ref(), output_path.as_ref())?;
+
     // Create recursive proofs
     let proofs = create_artifact_proofs(dir_path.as_ref(), keypair, Some(output_path.as_ref()))?;
 
@@ -711,6 +713,22 @@ pub fn create_mkpe_bundle<P: AsRef<Path>>(
     archive.save(output_path, keypair)?;
 
     Ok(archive)
+}
+
+fn validate_bundle_output_path(artifact_path: &Path, output_path: &Path) -> Result<()> {
+    if !artifact_path.is_dir() {
+        return Ok(());
+    }
+
+    if output_path.starts_with(artifact_path)
+        && output_path.file_name().and_then(|name| name.to_str()) != Some(".mkpe")
+    {
+        return Err(MkpeError::BundleError(
+            "Directory sidecar output inside the artifact tree must be named .mkpe".to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn create_artifact_proofs(
@@ -866,16 +884,18 @@ mod tests {
     fn test_mkpe_archive_create_and_load() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let keypair = crate::crypto::generate_keypair();
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
 
         // Create test files
         for i in 0..3 {
-            let file_path = temp_dir.path().join(format!("test{}.txt", i));
+            let file_path = artifact_dir.join(format!("test{}.txt", i));
             std::fs::write(file_path, format!("Test content {}", i))?;
         }
 
         // Create archive
         let archive_path = temp_dir.path().join("test.mkpe");
-        let archive = create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
+        let archive = create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
 
         // Load archive
         let loaded = MkpeArchive::load(&archive_path)?;
@@ -890,12 +910,14 @@ mod tests {
     fn test_mkpe_archive_preserves_proof_metadata_on_load() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let keypair = crate::crypto::generate_keypair();
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
 
-        let file_path = temp_dir.path().join("lineage.txt");
+        let file_path = artifact_dir.join("lineage.txt");
         std::fs::write(&file_path, b"Every byte carries provenance")?;
 
         let archive_path = temp_dir.path().join("lineage.mkpe");
-        let archive = create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
+        let archive = create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
         let loaded = MkpeArchive::load(&archive_path)?;
 
         let original_proof = &archive.bundles[0].proofs[0];
@@ -914,12 +936,14 @@ mod tests {
     fn test_mkpe_archive_verification() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let keypair = crate::crypto::generate_keypair();
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
 
-        let file_path = temp_dir.path().join("test.txt");
+        let file_path = artifact_dir.join("test.txt");
         std::fs::write(&file_path, b"Test content")?;
 
         let archive_path = temp_dir.path().join("test.mkpe");
-        let archive = create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
+        let archive = create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
 
         let is_valid = archive.verify().is_ok();
         assert!(is_valid);
@@ -1150,15 +1174,34 @@ mod tests {
     }
 
     #[test]
-    fn test_magic_header() -> Result<()> {
+    fn test_directory_bundle_rejects_sidecar_inside_artifact_tree() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let keypair = crate::crypto::generate_keypair();
 
-        let file_path = temp_dir.path().join("test.txt");
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
+        std::fs::write(artifact_dir.join("asset.txt"), b"proven bytes")?;
+
+        let archive_path = artifact_dir.join("proof.mkpe");
+        let result = create_mkpe_bundle(&artifact_dir, &keypair, &archive_path);
+
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_magic_header() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
+
+        let file_path = artifact_dir.join("test.txt");
         std::fs::write(&file_path, b"Test")?;
 
         let archive_path = temp_dir.path().join("test.mkpe");
-        create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
+        create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
 
         // Read magic header
         let mut file = File::open(&archive_path)?;

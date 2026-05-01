@@ -521,11 +521,17 @@ fn dna_command(command: DnaCommands, verbose: bool, format: OutputFormat) -> Res
                     std::process::exit(3);
                 }
             };
-            let trusted_public_key = public_key
+            let trusted_public_key = match public_key
                 .as_ref()
                 .map(std::fs::read_to_string)
                 .transpose()
-                .context("Failed to read trusted public key")?;
+            {
+                Ok(public_key) => public_key,
+                Err(error) => {
+                    emit_dna_verify_failure(&artifact, &bundle, &MkpeError::IoError(error), format);
+                    std::process::exit(3);
+                }
+            };
 
             let verification = match trusted_public_key.as_deref() {
                 Some(public_key) => archive.verify_artifact_with_public_key(&artifact, public_key),
