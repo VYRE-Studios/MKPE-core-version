@@ -6,7 +6,8 @@ use anyhow::Result;
 use chrono::Utc;
 use log::{error, info, warn};
 use morse_kirby_core::{
-    create_mkpe_bundle, AuditEvent, AuditEventType, AuditLog, KeyPair, MkpeArchive,
+    create_mkpe_bundle, default_sidecar_path, AuditEvent, AuditEventType, AuditLog, KeyPair,
+    MkpeArchive,
 };
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -38,89 +39,90 @@ struct ServiceConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            watch_paths: vec![PathBuf::from("C:\\Projects")],
+            watch_paths: Vec::new(),
             interval_seconds: 900, // 15 minutes
             log_dir: PathBuf::from("C:\\ProgramData\\MKPE\\logs"),
             skip_extensions: vec![".tmp".to_string(), ".log".to_string(), ".cache".to_string()],
             key_path: Some(PathBuf::from(
                 "C:\\ProgramData\\MKPE\\keys\\mkpe_private.key",
             )),
-            auto_create_missing_proofs: true,
+            auto_create_missing_proofs: false,
         }
     }
 }
 
-fn load_config() -> ServiceConfig {
+fn load_config() -> Result<ServiceConfig> {
     let config_path = PathBuf::from("C:\\ProgramData\\MKPE\\config.json");
     let defaults = ServiceConfig::default();
 
-    if config_path.exists() {
-        if let Ok(content) = std::fs::read_to_string(&config_path) {
-            if let Ok(full_config) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(service_config) = full_config.get("service_config") {
-                    // Extract watch_paths
-                    let watch_paths = service_config
-                        .get("watch_paths")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(PathBuf::from))
-                                .collect()
-                        })
-                        .unwrap_or_else(|| defaults.watch_paths.clone());
-
-                    let interval_seconds = service_config
-                        .get("interval_seconds")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(900);
-
-                    // Extract logging config
-                    let log_dir = full_config
-                        .get("logging")
-                        .and_then(|l| l.get("log_dir"))
-                        .and_then(|v| v.as_str())
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| PathBuf::from("C:\\ProgramData\\MKPE\\logs"));
-
-                    // Extract verification config
-                    let skip_extensions = full_config
-                        .get("verification")
-                        .and_then(|v| v.get("skip_extensions"))
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
-                                .collect()
-                        })
-                        .unwrap_or_else(|| defaults.skip_extensions.clone());
-
-                    let key_path = full_config
-                        .get("signing")
-                        .and_then(|v| v.get("key_path"))
-                        .and_then(|v| v.as_str())
-                        .map(PathBuf::from)
-                        .or_else(|| defaults.key_path.clone());
-
-                    let auto_create_missing_proofs = full_config
-                        .get("service_config")
-                        .and_then(|v| v.get("auto_create_missing_proofs"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-
-                    return ServiceConfig {
-                        watch_paths,
-                        interval_seconds,
-                        log_dir,
-                        skip_extensions,
-                        key_path,
-                        auto_create_missing_proofs,
-                    };
-                }
-            }
-        }
+    if !config_path.exists() {
+        return Ok(defaults);
     }
 
-    ServiceConfig::default()
+    let content = std::fs::read_to_string(&config_path)?;
+    load_config_from_str(&content)
+}
+
+fn load_config_from_str(content: &str) -> Result<ServiceConfig> {
+    let defaults = ServiceConfig::default();
+    let full_config = serde_json::from_str::<serde_json::Value>(content)?;
+    let service_config = full_config
+        .get("service_config")
+        .ok_or_else(|| anyhow::anyhow!("Missing service_config section"))?;
+
+    let watch_paths = service_config
+        .get("watch_paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(PathBuf::from))
+                .collect()
+        })
+        .unwrap_or_else(|| defaults.watch_paths.clone());
+
+    let interval_seconds = service_config
+        .get("interval_seconds")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(defaults.interval_seconds);
+
+    let log_dir = full_config
+        .get("logging")
+        .and_then(|l| l.get("log_dir"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .unwrap_or(defaults.log_dir);
+
+    let skip_extensions = full_config
+        .get("verification")
+        .and_then(|v| v.get("skip_extensions"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or(defaults.skip_extensions);
+
+    let key_path = full_config
+        .get("signing")
+        .and_then(|v| v.get("key_path"))
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from)
+        .or(defaults.key_path);
+
+    let auto_create_missing_proofs = service_config
+        .get("auto_create_missing_proofs")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(defaults.auto_create_missing_proofs);
+
+    Ok(ServiceConfig {
+        watch_paths,
+        interval_seconds,
+        log_dir,
+        skip_extensions,
+        key_path,
+        auto_create_missing_proofs,
+    })
 }
 
 fn load_service_keypair(config: &ServiceConfig) -> Option<KeyPair> {
@@ -137,8 +139,19 @@ fn load_service_keypair(config: &ServiceConfig) -> Option<KeyPair> {
 }
 
 fn should_skip_file(path: &Path, config: &ServiceConfig) -> bool {
-    if path.extension().and_then(|ext| ext.to_str()) == Some("mkpe") {
+    if path.file_name().and_then(|name| name.to_str()) == Some(".mkpe") {
         return true;
+    }
+
+    if path.extension().and_then(|ext| ext.to_str()) == Some("mkpe") {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return true;
+        };
+        if let Some(original_name) = file_name.strip_suffix(".mkpe") {
+            if path.with_file_name(original_name).exists() {
+                return true;
+            }
+        }
     }
 
     path.extension()
@@ -153,7 +166,27 @@ fn should_skip_file(path: &Path, config: &ServiceConfig) -> bool {
 }
 
 fn sidecar_path_for(path: &Path) -> PathBuf {
-    path.with_extension("mkpe")
+    default_sidecar_path(path)
+}
+
+fn audit_event(audit_log: &AuditLog, event: &AuditEvent) -> bool {
+    match audit_log.log(event) {
+        Ok(()) => true,
+        Err(error) => {
+            error!("Failed to write audit event: {}", error);
+            false
+        }
+    }
+}
+
+fn audit_failure(audit_log: &AuditLog, target: &str, reason: &str) -> bool {
+    match audit_log.log_failure(target, reason) {
+        Ok(()) => true,
+        Err(error) => {
+            error!("Failed to write audit failure: {}", error);
+            false
+        }
+    }
 }
 
 fn verify_or_create_sidecar(
@@ -166,8 +199,9 @@ fn verify_or_create_sidecar(
 
     if sidecar_path.exists() {
         match MkpeArchive::load(&sidecar_path).and_then(|archive| archive.verify_artifact(path)) {
-            Ok(report) => {
-                let _ = audit_log.log(&AuditEvent::new(
+            Ok(report) => audit_event(
+                audit_log,
+                &AuditEvent::new(
                     AuditEventType::VerificationSuccess,
                     Some(path.to_string_lossy().to_string()),
                     format!(
@@ -177,11 +211,11 @@ fn verify_or_create_sidecar(
                         report.root_hash
                     ),
                     "INFO",
-                ));
-                true
-            }
+                ),
+            ),
             Err(error) => {
-                let _ = audit_log.log_failure(
+                audit_failure(
+                    audit_log,
                     path.to_str().unwrap_or(""),
                     &format!("DNA proof mismatch: {}", error),
                 );
@@ -191,8 +225,9 @@ fn verify_or_create_sidecar(
     } else if config.auto_create_missing_proofs {
         match keypair {
             Some(keypair) => match create_mkpe_bundle(path, keypair, sidecar_path.as_path()) {
-                Ok(archive) => {
-                    let _ = audit_log.log(&AuditEvent::new(
+                Ok(archive) => audit_event(
+                    audit_log,
+                    &AuditEvent::new(
                         AuditEventType::BundleCreated,
                         Some(path.to_string_lossy().to_string()),
                         format!(
@@ -201,11 +236,11 @@ fn verify_or_create_sidecar(
                             archive.manifest.bundle_root_hash
                         ),
                         "INFO",
-                    ));
-                    true
-                }
+                    ),
+                ),
                 Err(error) => {
-                    let _ = audit_log.log_failure(
+                    audit_failure(
+                        audit_log,
                         path.to_str().unwrap_or(""),
                         &format!("Failed to create DNA sidecar: {}", error),
                     );
@@ -213,7 +248,8 @@ fn verify_or_create_sidecar(
                 }
             },
             None => {
-                let _ = audit_log.log_failure(
+                audit_failure(
+                    audit_log,
                     path.to_str().unwrap_or(""),
                     "Missing MKPE DNA sidecar and no service signing key configured",
                 );
@@ -221,7 +257,11 @@ fn verify_or_create_sidecar(
             }
         }
     } else {
-        let _ = audit_log.log_failure(path.to_str().unwrap_or(""), "Missing MKPE DNA sidecar");
+        audit_failure(
+            audit_log,
+            path.to_str().unwrap_or(""),
+            "Missing MKPE DNA sidecar",
+        );
         false
     }
 }
@@ -245,12 +285,17 @@ fn run_verification_scan(
         }
     };
 
-    let _ = audit_log.log(&AuditEvent::new(
-        AuditEventType::VerificationSuccess,
-        Some("system".to_string()),
-        "Verification scan initiated".to_string(),
-        "INFO",
-    ));
+    if !audit_event(
+        &audit_log,
+        &AuditEvent::new(
+            AuditEventType::VerificationSuccess,
+            Some("system".to_string()),
+            "Verification scan initiated".to_string(),
+            "INFO",
+        ),
+    ) {
+        return;
+    }
 
     let mut total_checked = 0;
     let mut errors = 0;
@@ -259,7 +304,8 @@ fn run_verification_scan(
     for watch_path in &config.watch_paths {
         if !watch_path.exists() {
             warn!("Watch path does not exist: {:?}", watch_path);
-            let _ = audit_log.log_failure(
+            audit_failure(
+                &audit_log,
                 watch_path.to_str().unwrap_or("unknown"),
                 "Watch path does not exist",
             );
@@ -267,11 +313,28 @@ fn run_verification_scan(
             continue;
         }
 
-        for entry in WalkDir::new(watch_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
+        for entry in WalkDir::new(watch_path).into_iter() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    errors += 1;
+                    let path = error
+                        .path()
+                        .map(|path| path.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
+                    audit_failure(
+                        &audit_log,
+                        &path,
+                        &format!("Traversal error during DNA scan: {}", error),
+                    );
+                    continue;
+                }
+            };
+
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
             // Check if service is still running
             if !running.load(std::sync::atomic::Ordering::Relaxed) {
                 info!("Service stopping, aborting scan");
@@ -291,15 +354,18 @@ fn run_verification_scan(
         }
     }
 
-    let _ = audit_log.log(&AuditEvent::new(
-        AuditEventType::VerificationSuccess,
-        Some("system".to_string()),
-        format!(
-            "Scan complete. Checked: {}, Errors: {}",
-            total_checked, errors
+    audit_event(
+        &audit_log,
+        &AuditEvent::new(
+            AuditEventType::VerificationSuccess,
+            Some("system".to_string()),
+            format!(
+                "Scan complete. Checked: {}, Errors: {}",
+                total_checked, errors
+            ),
+            "INFO",
         ),
-        "INFO",
-    ));
+    );
 
     info!(
         "Verification scan complete: {} files checked, {} errors",
@@ -307,11 +373,117 @@ fn run_verification_scan(
     );
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use morse_kirby_core::{generate_keypair, MkpeArchive};
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_sidecar_path_preserves_full_file_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let txt = temp_dir.path().join("report.txt");
+        let pdf = temp_dir.path().join("report.pdf");
+
+        assert_eq!(
+            sidecar_path_for(&txt),
+            temp_dir.path().join("report.txt.mkpe")
+        );
+        assert_eq!(
+            sidecar_path_for(&pdf),
+            temp_dir.path().join("report.pdf.mkpe")
+        );
+        assert_ne!(sidecar_path_for(&txt), sidecar_path_for(&pdf));
+    }
+
+    #[test]
+    fn test_should_skip_only_recognized_sidecars_not_mkpe_payloads() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = ServiceConfig::default();
+
+        let payload = temp_dir.path().join("payload.mkpe");
+        std::fs::write(&payload, b"payload bytes").unwrap();
+        assert!(!should_skip_file(&payload, &config));
+
+        let artifact = temp_dir.path().join("report.txt");
+        let sidecar = temp_dir.path().join("report.txt.mkpe");
+        std::fs::write(&artifact, b"report bytes").unwrap();
+        std::fs::write(&sidecar, b"sidecar bytes").unwrap();
+        assert!(should_skip_file(&sidecar, &config));
+    }
+
+    #[test]
+    fn test_load_config_requires_service_config_section() {
+        let config = r#"{"logging":{"log_dir":"C:\\Temp\\MKPE"}}"#;
+        assert!(load_config_from_str(config).is_err());
+    }
+
+    #[test]
+    fn test_verify_or_create_sidecar_handles_same_stem_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let keypair = generate_keypair();
+        let private_key_path = temp_dir.path().join("mkpe_private.key");
+        let public_key_path = temp_dir.path().join("mkpe_public.key");
+        std::fs::write(&private_key_path, &keypair.private_key).unwrap();
+        std::fs::write(&public_key_path, &keypair.public_key).unwrap();
+
+        let txt = temp_dir.path().join("report.txt");
+        let pdf = temp_dir.path().join("report.pdf");
+        std::fs::write(&txt, b"text report").unwrap();
+        std::fs::write(&pdf, b"pdf report").unwrap();
+
+        let log_dir = temp_dir.path().join("logs");
+        let config = ServiceConfig {
+            watch_paths: vec![temp_dir.path().to_path_buf()],
+            interval_seconds: 1,
+            log_dir: log_dir.clone(),
+            skip_extensions: Vec::new(),
+            key_path: Some(private_key_path),
+            auto_create_missing_proofs: true,
+        };
+        let audit_log = AuditLog::new(log_dir.join("audit.jsonl")).unwrap();
+
+        assert!(verify_or_create_sidecar(
+            &txt,
+            &config,
+            &audit_log,
+            Some(&keypair)
+        ));
+        assert!(verify_or_create_sidecar(
+            &pdf,
+            &config,
+            &audit_log,
+            Some(&keypair)
+        ));
+
+        let txt_sidecar = temp_dir.path().join("report.txt.mkpe");
+        let pdf_sidecar = temp_dir.path().join("report.pdf.mkpe");
+        assert!(txt_sidecar.exists());
+        assert!(pdf_sidecar.exists());
+        assert_ne!(txt_sidecar, pdf_sidecar);
+
+        MkpeArchive::load(&txt_sidecar)
+            .unwrap()
+            .verify_artifact(&txt)
+            .unwrap();
+        MkpeArchive::load(&pdf_sidecar)
+            .unwrap()
+            .verify_artifact(&pdf)
+            .unwrap();
+    }
+}
+
 fn service_main(_arguments: Vec<OsString>) {
     env_logger::init();
     info!("MKPE Integrity Service starting");
 
-    let config = load_config();
+    let config = match load_config() {
+        Ok(config) => config,
+        Err(error) => {
+            error!("Failed to load service configuration: {}", error);
+            return;
+        }
+    };
     info!("Configuration loaded: {:?}", config);
 
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -398,7 +570,7 @@ fn main() -> Result<()> {
         env_logger::init();
         info!("Running in console mode");
 
-        let config = load_config();
+        let config = load_config()?;
         let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
 
         // Set up Ctrl+C handler

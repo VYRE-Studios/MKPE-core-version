@@ -3,9 +3,9 @@
 //! The canonical CLI tool for the Morse-Kirby Provenance Engine
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::*;
-use morse_kirby_core::*;
+use morse_kirby_core::{MkpeError, *};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -20,6 +20,16 @@ struct Cli {
     /// Verbose output
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Output format for automation-friendly commands
+    #[arg(long, global = true, value_enum, default_value_t = OutputFormat::Human)]
+    format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum OutputFormat {
+    Human,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -133,6 +143,10 @@ enum DnaCommands {
         /// .mkpe sidecar proof bundle
         #[arg(short, long)]
         bundle: PathBuf,
+
+        /// Trusted public key expected to have signed the DNA proof
+        #[arg(long)]
+        public_key: Option<PathBuf>,
     },
 
     /// Inspect a .mkpe DNA proof bundle
@@ -159,7 +173,7 @@ fn main() -> Result<()> {
             validate_cdna_command(path, proof, key, cli.verbose)
         }
         Commands::Version => version_command(),
-        Commands::Dna { command } => dna_command(command, cli.verbose),
+        Commands::Dna { command } => dna_command(command, cli.verbose, cli.format),
     }
 }
 
@@ -173,8 +187,7 @@ fn keygen_command(output: PathBuf, verbose: bool) -> Result<()> {
     let private_key_path = output.join("mkpe_private.key");
     let public_key_path = output.join("mkpe_public.key");
 
-    std::fs::write(&private_key_path, &keypair.private_key)
-        .context("Failed to write private key")?;
+    write_private_key(&private_key_path, &keypair.private_key)?;
     std::fs::write(&public_key_path, &keypair.public_key).context("Failed to write public key")?;
 
     println!("{}", "✓ Keypair generated successfully!".green().bold());
@@ -187,6 +200,36 @@ fn keygen_command(output: PathBuf, verbose: bool) -> Result<()> {
         println!("Keep your private key secure. Anyone with access to it can sign on your behalf.");
     }
 
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_private_key(path: &PathBuf, private_key: &str) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .context("Failed to create private key with restricted permissions")?;
+    file.write_all(private_key.as_bytes())
+        .context("Failed to write private key")?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_private_key(path: &PathBuf, private_key: &str) -> Result<()> {
+    use std::io::Write as _;
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .context("Failed to create private key without overwriting an existing key")?;
+    file.write_all(private_key.as_bytes())
+        .context("Failed to write private key")?;
     Ok(())
 }
 
@@ -211,7 +254,7 @@ fn sign_command(
         key_id,
     );
 
-    let output_path = output.unwrap_or_else(|| path.with_extension("mkpe"));
+    let output_path = output.unwrap_or_else(|| morse_kirby_core::default_sidecar_path(&path));
 
     let archive = create_mkpe_bundle(&path, &keypair, &output_path)
         .context("Failed to create MKPE bundle")?;
@@ -431,43 +474,108 @@ fn validate_cdna_command(
     Ok(())
 }
 
-fn dna_command(command: DnaCommands, verbose: bool) -> Result<()> {
+fn dna_command(command: DnaCommands, verbose: bool, format: OutputFormat) -> Result<()> {
     match command {
         DnaCommands::Create {
             artifact,
             key,
             output,
         } => {
-            let output_path = output.unwrap_or_else(|| default_dna_sidecar_path(&artifact));
+            let output_path =
+                output.unwrap_or_else(|| morse_kirby_core::default_sidecar_path(&artifact));
             let keypair = load_keypair(&key)?;
             let archive = create_mkpe_bundle(&artifact, &keypair, &output_path)
                 .context("Failed to create MKPE DNA proof")?;
             let stats = archive.stats();
 
-            println!("{}", "DNA proof created".green().bold());
-            println!("  {} {}", "Artifact:".bold(), artifact.display());
-            println!("  {} {}", "Sidecar:".bold(), output_path.display());
-            println!("  {} {}", "Byte proofs:".bold(), stats.total_proof_items);
-            println!("  {} {}", "Root hash:".bold(), stats.root_hash);
-            println!("  {} {}", "Manifest ID:".bold(), stats.manifest_id);
+            if format == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "created",
+                        "artifact": artifact,
+                        "sidecar": output_path,
+                        "byte_proofs": stats.total_proof_items,
+                        "root_hash": stats.root_hash,
+                        "manifest_id": stats.manifest_id,
+                    })
+                );
+            } else {
+                println!("{}", "DNA proof created".green().bold());
+                println!("  {} {}", "Artifact:".bold(), artifact.display());
+                println!("  {} {}", "Sidecar:".bold(), output_path.display());
+                println!("  {} {}", "Byte proofs:".bold(), stats.total_proof_items);
+                println!("  {} {}", "Root hash:".bold(), stats.root_hash);
+                println!("  {} {}", "Manifest ID:".bold(), stats.manifest_id);
+            }
         }
-        DnaCommands::Verify { artifact, bundle } => {
-            let archive = MkpeArchive::load(&bundle).context("Failed to load MKPE DNA proof")?;
+        DnaCommands::Verify {
+            artifact,
+            bundle,
+            public_key,
+        } => {
+            let archive = match MkpeArchive::load(&bundle) {
+                Ok(archive) => archive,
+                Err(error) => {
+                    emit_dna_verify_failure(&artifact, &bundle, &error, format);
+                    std::process::exit(3);
+                }
+            };
+            let trusted_public_key = public_key
+                .as_ref()
+                .map(std::fs::read_to_string)
+                .transpose()
+                .context("Failed to read trusted public key")?;
 
-            match archive.verify_artifact(&artifact) {
+            let verification = match trusted_public_key.as_deref() {
+                Some(public_key) => archive.verify_artifact_with_public_key(&artifact, public_key),
+                None => archive.verify_artifact(&artifact),
+            };
+
+            match verification {
                 Ok(report) => {
-                    println!("{}", "DNA verification PASSED".green().bold());
-                    println!("  {} {}", "Artifact:".bold(), artifact.display());
-                    println!("  {} {}", "Sidecar:".bold(), bundle.display());
-                    println!("  {} {}", "Verified proofs:".bold(), report.verified_proofs);
-                    println!("  {} {}", "Root hash:".bold(), report.root_hash);
+                    let trusted = trusted_public_key.is_some();
+                    if format == OutputFormat::Json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "verified",
+                                "trusted_signer": trusted,
+                                "artifact": artifact,
+                                "sidecar": bundle,
+                                "verified_proofs": report.verified_proofs,
+                                "root_hash": report.root_hash,
+                                "manifest_id": report.manifest_id,
+                            })
+                        );
+                    } else {
+                        if trusted {
+                            println!(
+                                "{}",
+                                "DNA verification PASSED (trusted signer)".green().bold()
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                "DNA integrity PASSED (signer not trust-pinned)"
+                                    .yellow()
+                                    .bold()
+                            );
+                        }
+                        println!("  {} {}", "Artifact:".bold(), artifact.display());
+                        println!("  {} {}", "Sidecar:".bold(), bundle.display());
+                        println!("  {} {}", "Verified proofs:".bold(), report.verified_proofs);
+                        println!("  {} {}", "Root hash:".bold(), report.root_hash);
+                    }
                 }
                 Err(error) => {
-                    println!("{}", "DNA verification FAILED".red().bold());
-                    println!("  {} {}", "Artifact:".bold(), artifact.display());
-                    println!("  {} {}", "Sidecar:".bold(), bundle.display());
-                    println!("  {} {}", "Reason:".bold(), error);
-                    std::process::exit(1);
+                    let code = if matches!(error, MkpeError::VerificationFailed(_)) {
+                        2
+                    } else {
+                        3
+                    };
+                    emit_dna_verify_failure(&artifact, &bundle, &error, format);
+                    std::process::exit(code);
                 }
             }
         }
@@ -479,12 +587,29 @@ fn dna_command(command: DnaCommands, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn default_dna_sidecar_path(artifact: &PathBuf) -> PathBuf {
-    if artifact.is_dir() {
-        return artifact.join(".mkpe");
+fn emit_dna_verify_failure(
+    artifact: &PathBuf,
+    bundle: &PathBuf,
+    error: &MkpeError,
+    format: OutputFormat,
+) {
+    if format == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "failed",
+                "artifact": artifact,
+                "sidecar": bundle,
+                "reason": error.to_string(),
+            })
+        );
+        return;
     }
 
-    artifact.with_extension("mkpe")
+    println!("{}", "DNA verification FAILED".red().bold());
+    println!("  {} {}", "Artifact:".bold(), artifact.display());
+    println!("  {} {}", "Sidecar:".bold(), bundle.display());
+    println!("  {} {}", "Reason:".bold(), error);
 }
 
 fn version_command() -> Result<()> {

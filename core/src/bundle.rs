@@ -17,14 +17,6 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-/// State marker for an unverified archive
-#[derive(Debug, Clone)]
-pub struct Unverified;
-
-/// State marker for a cryptographically verified archive
-#[derive(Debug, Clone)]
-pub struct Verified;
-
 /// Wrapper ensuring an archive has been verified
 #[derive(Debug, Clone)]
 pub struct VerifiedMkpeArchive(MkpeArchive);
@@ -54,6 +46,11 @@ pub const FORMAT_VERSION_V1: u8 = 0x01;
 /// Flags
 pub const FLAG_ENCRYPTED: u8 = 0x01;
 pub const FLAG_COMPRESSED: u8 = 0x02;
+const HEADER_SIZE: u64 = 32;
+const FOOTER_SIZE: u64 = 8;
+const SIGNATURE_BLOCK_SIZE: u64 = 96;
+const MAX_MANIFEST_SIZE: u64 = 16 * 1024 * 1024;
+const MAX_PROOF_SIZE: u64 = 64 * 1024 * 1024;
 
 /// 32-byte structured header
 #[repr(C)]
@@ -295,6 +292,7 @@ impl MkpeArchive {
     /// Load archive from a .mkpe file using binary format v1.0
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let mut file = File::open(path)?;
+        let file_len = file.metadata()?.len();
 
         // Read and parse 32-byte header
         let mut header_bytes = [0u8; 32];
@@ -309,6 +307,7 @@ impl MkpeArchive {
                 header.version
             )));
         }
+        validate_section_sizes(&header, file_len)?;
 
         // Read manifest section
         let mut manifest_bytes = vec![0u8; header.manifest_size as usize];
@@ -443,6 +442,12 @@ impl MkpeArchive {
         // Extract public key (32 bytes) and signature (64 bytes)
         let public_key_bytes = &signature_block[0..32];
         let signature_bytes = &signature_block[32..96];
+        let signature_public_key = general_purpose::STANDARD.encode(public_key_bytes);
+        if signature_public_key != _manifest_obj.verifier_public_key {
+            return Err(MkpeError::VerificationFailed(
+                "Archive signer does not match manifest verifier public key".to_string(),
+            ));
+        }
 
         // Calculate data hash
         let mut hasher = Sha256::new();
@@ -532,6 +537,8 @@ impl MkpeArchive {
         let artifact_path = artifact_path.as_ref();
         if artifact_path.is_dir() {
             assert_directory_inventory_matches(artifact_path, &self.bundles)?;
+        } else {
+            assert_single_file_identity_matches(artifact_path, &self.bundles)?;
         }
 
         for bundle in &self.bundles {
@@ -556,6 +563,21 @@ impl MkpeArchive {
             manifest_id: self.manifest.manifest_id.clone(),
         })
     }
+
+    /// Verify artifact bytes and require the bundle signer to match a trusted public key.
+    pub fn verify_artifact_with_public_key<P: AsRef<Path>>(
+        &self,
+        artifact_path: P,
+        trusted_public_key: &str,
+    ) -> Result<ArtifactVerificationReport> {
+        if self.manifest.verifier_public_key != trusted_public_key.trim() {
+            return Err(MkpeError::VerificationFailed(
+                "MKPE signer is not the expected trusted public key".to_string(),
+            ));
+        }
+
+        self.verify_artifact(artifact_path)
+    }
 }
 
 /// Statistics about an archive
@@ -566,6 +588,58 @@ pub struct ArchiveStats {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub manifest_id: String,
     pub root_hash: String,
+}
+
+/// Default sidecar path for a proven artifact.
+pub fn default_sidecar_path(artifact: &Path) -> PathBuf {
+    if artifact.is_dir() {
+        return artifact.join(".mkpe");
+    }
+
+    let file_name = artifact
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "artifact".to_string());
+    artifact.with_file_name(format!("{}.mkpe", file_name))
+}
+
+fn validate_section_sizes(header: &MkpeHeader, file_len: u64) -> Result<()> {
+    if header.signature_size != SIGNATURE_BLOCK_SIZE {
+        return Err(MkpeError::BundleError(format!(
+            "Invalid signature block size: {}",
+            header.signature_size
+        )));
+    }
+
+    if header.manifest_size > MAX_MANIFEST_SIZE {
+        return Err(MkpeError::BundleError(format!(
+            "Manifest section exceeds maximum size: {}",
+            header.manifest_size
+        )));
+    }
+
+    if header.proof_size > MAX_PROOF_SIZE {
+        return Err(MkpeError::BundleError(format!(
+            "Proof section exceeds maximum size: {}",
+            header.proof_size
+        )));
+    }
+
+    let expected_len = HEADER_SIZE
+        .checked_add(header.manifest_size)
+        .and_then(|len| len.checked_add(header.proof_size))
+        .and_then(|len| len.checked_add(header.signature_size))
+        .and_then(|len| len.checked_add(FOOTER_SIZE))
+        .ok_or_else(|| MkpeError::BundleError("Archive section sizes overflow".to_string()))?;
+
+    if expected_len != file_len {
+        return Err(MkpeError::BundleError(format!(
+            "Archive length mismatch: expected {}, got {}",
+            expected_len, file_len
+        )));
+    }
+
+    Ok(())
 }
 
 /// Calculate CRC32 checksum
@@ -616,7 +690,7 @@ pub fn create_mkpe_bundle<P: AsRef<Path>>(
     output_path: P,
 ) -> Result<MkpeArchive> {
     // Create recursive proofs
-    let proofs = create_artifact_proofs(dir_path.as_ref(), keypair)?;
+    let proofs = create_artifact_proofs(dir_path.as_ref(), keypair, Some(output_path.as_ref()))?;
 
     // Create proof bundle
     let bundle = crate::proof::create_proof_bundle(proofs, keypair, None)?;
@@ -639,7 +713,11 @@ pub fn create_mkpe_bundle<P: AsRef<Path>>(
     Ok(archive)
 }
 
-fn create_artifact_proofs(path: &Path, keypair: &crate::crypto::KeyPair) -> Result<Vec<ProofItem>> {
+fn create_artifact_proofs(
+    path: &Path,
+    keypair: &crate::crypto::KeyPair,
+    sidecar_path: Option<&Path>,
+) -> Result<Vec<ProofItem>> {
     if path.is_file() {
         let mut proof = crate::proof::create_proof_item(path, keypair)?;
         proof.path = path
@@ -650,7 +728,7 @@ fn create_artifact_proofs(path: &Path, keypair: &crate::crypto::KeyPair) -> Resu
     }
 
     let mut proofs = Vec::new();
-    collect_artifact_proofs(path, path, keypair, &mut proofs)?;
+    collect_artifact_proofs(path, path, keypair, sidecar_path, &mut proofs)?;
     proofs.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(proofs)
 }
@@ -659,16 +737,17 @@ fn collect_artifact_proofs(
     root: &Path,
     dir: &Path,
     keypair: &crate::crypto::KeyPair,
+    sidecar_path: Option<&Path>,
     proofs: &mut Vec<ProofItem>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            collect_artifact_proofs(root, &path, keypair, proofs)?;
+            collect_artifact_proofs(root, &path, keypair, sidecar_path, proofs)?;
             continue;
         }
-        if is_mkpe_sidecar_file(&path) {
+        if should_exclude_sidecar(&path, sidecar_path) {
             continue;
         }
 
@@ -725,7 +804,7 @@ fn collect_current_artifact_paths_inner(
             collect_current_artifact_paths_inner(root, &path, paths)?;
             continue;
         }
-        if is_mkpe_sidecar_file(&path) {
+        if path.file_name().and_then(|name| name.to_str()) == Some(".mkpe") {
             continue;
         }
 
@@ -735,9 +814,39 @@ fn collect_current_artifact_paths_inner(
     Ok(())
 }
 
-fn is_mkpe_sidecar_file(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()) == Some(".mkpe")
-        || path.extension().and_then(|ext| ext.to_str()) == Some("mkpe")
+fn should_exclude_sidecar(path: &Path, sidecar_path: Option<&Path>) -> bool {
+    sidecar_path.is_some_and(|sidecar_path| path == sidecar_path)
+}
+
+fn assert_single_file_identity_matches(
+    artifact_path: &Path,
+    bundles: &[ProofBundle],
+) -> Result<()> {
+    let mut proofs = bundles.iter().flat_map(|bundle| bundle.proofs.iter());
+    let proof = proofs.next().ok_or_else(|| {
+        MkpeError::VerificationFailed("Single-file artifact has no MKPE proof".to_string())
+    })?;
+
+    if proofs.next().is_some() {
+        return Err(MkpeError::VerificationFailed(
+            "Single-file artifact cannot be verified against a multi-proof bundle".to_string(),
+        ));
+    }
+
+    let expected_path = artifact_path
+        .file_name()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| artifact_path.to_path_buf());
+
+    if proof.path != expected_path {
+        return Err(MkpeError::VerificationFailed(format!(
+            "Proof path {} does not match artifact identity {}",
+            proof.path.display(),
+            expected_path.display()
+        )));
+    }
+
+    Ok(())
 }
 
 fn resolve_proof_path(artifact_path: &Path, proof: &ProofItem) -> PathBuf {
@@ -860,6 +969,182 @@ mod tests {
 
         let tampered = archive.verify_artifact(&artifact_dir);
         assert!(tampered.is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_directory_payload_mkpe_file_is_proven() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
+        std::fs::write(
+            artifact_dir.join("payload.mkpe"),
+            b"payload sidecar-looking bytes",
+        )?;
+
+        let archive_path = temp_dir.path().join("artifact.mkpe");
+        create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
+
+        let archive = MkpeArchive::load(&archive_path)?;
+        let report = archive.verify_artifact(&artifact_dir)?;
+        assert_eq!(report.verified_proofs, 1);
+
+        std::fs::write(artifact_dir.join("payload.mkpe"), b"tampered payload")?;
+        assert!(archive.verify_artifact(&artifact_dir).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_rejects_trailing_bytes_after_footer() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let file_path = temp_dir.path().join("asset.txt");
+        std::fs::write(&file_path, b"original byte dna")?;
+
+        let archive_path = temp_dir.path().join("asset.mkpe");
+        create_mkpe_bundle(&file_path, &keypair, &archive_path)?;
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&archive_path)?;
+        file.write_all(b"trailing garbage")?;
+
+        assert!(MkpeArchive::load(&archive_path).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_rejects_manifest_and_archive_signer_mismatch() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let manifest_key = crate::crypto::generate_keypair();
+        let archive_key = crate::crypto::generate_keypair();
+
+        let file_path = temp_dir.path().join("asset.txt");
+        std::fs::write(&file_path, b"original byte dna")?;
+
+        let proof = crate::proof::create_proof_item(&file_path, &manifest_key)?;
+        let bundle = crate::proof::create_proof_bundle(vec![proof], &manifest_key, None)?;
+        let mut manifest = Manifest::new(
+            bundle.root_hash.clone(),
+            bundle.proofs.len(),
+            manifest_key.public_key.clone(),
+            None,
+        );
+        manifest.sign(&manifest_key)?;
+
+        let archive = MkpeArchive::new(manifest, vec![bundle]);
+        let archive_path = temp_dir.path().join("asset.mkpe");
+        archive.save(&archive_path, &archive_key)?;
+
+        assert!(MkpeArchive::load(&archive_path).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_verify_artifact_rejects_untrusted_public_key() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let trusted_key = crate::crypto::generate_keypair();
+        let attacker_key = crate::crypto::generate_keypair();
+
+        let file_path = temp_dir.path().join("asset.txt");
+        std::fs::write(&file_path, b"attacker supplied bytes")?;
+
+        let archive_path = temp_dir.path().join("asset.mkpe");
+        create_mkpe_bundle(&file_path, &attacker_key, &archive_path)?;
+
+        let archive = MkpeArchive::load(&archive_path)?;
+        assert!(archive
+            .verify_artifact_with_public_key(&file_path, &trusted_key.public_key)
+            .is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_single_file_verification_rejects_mismatched_proof_filename() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let proven_path = temp_dir.path().join("release.exe");
+        let checked_path = temp_dir.path().join("scratch.txt");
+        std::fs::write(&proven_path, b"same byte payload")?;
+        std::fs::write(&checked_path, b"same byte payload")?;
+
+        let archive_path = temp_dir.path().join("release.exe.mkpe");
+        create_mkpe_bundle(&proven_path, &keypair, &archive_path)?;
+
+        let archive = MkpeArchive::load(&archive_path)?;
+        assert!(archive.verify_artifact(&checked_path).is_err());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_rejects_oversized_section_headers() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let archive_path = temp_dir.path().join("oversized.mkpe");
+
+        let header = MkpeHeader::new(MAX_MANIFEST_SIZE + 1, 0, SIGNATURE_BLOCK_SIZE);
+        let mut file = File::create(&archive_path)?;
+        file.write_all(&header.to_bytes())?;
+        file.write_all(&MkpeFooter::new(0).to_bytes())?;
+
+        let error = MkpeArchive::load(&archive_path).unwrap_err();
+        assert!(error.to_string().contains("Manifest section exceeds"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_default_sidecar_path_preserves_full_file_name() {
+        let file_path = PathBuf::from("report.txt");
+        let other_file_path = PathBuf::from("report.pdf");
+
+        assert_eq!(
+            default_sidecar_path(&file_path),
+            PathBuf::from("report.txt.mkpe")
+        );
+        assert_eq!(
+            default_sidecar_path(&other_file_path),
+            PathBuf::from("report.pdf.mkpe")
+        );
+        assert_ne!(
+            default_sidecar_path(&file_path),
+            default_sidecar_path(&other_file_path)
+        );
+    }
+
+    #[test]
+    fn test_verify_artifact_detects_nested_folder_mutation_and_deletion() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let artifact_dir = temp_dir.path().join("artifact");
+        let nested_dir = artifact_dir.join("sub");
+        std::fs::create_dir_all(&nested_dir)?;
+        std::fs::write(artifact_dir.join("root.txt"), b"root bytes")?;
+        std::fs::write(nested_dir.join("nested.txt"), b"nested bytes")?;
+
+        let archive_path = temp_dir.path().join("artifact.mkpe");
+        create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
+
+        let archive = MkpeArchive::load(&archive_path)?;
+        let report = archive.verify_artifact(&artifact_dir)?;
+        assert_eq!(report.verified_proofs, 2);
+
+        std::fs::write(nested_dir.join("nested.txt"), b"tampered nested bytes")?;
+        assert!(archive.verify_artifact(&artifact_dir).is_err());
+
+        std::fs::write(nested_dir.join("nested.txt"), b"nested bytes")?;
+        std::fs::remove_file(artifact_dir.join("root.txt"))?;
+        assert!(archive.verify_artifact(&artifact_dir).is_err());
 
         Ok(())
     }

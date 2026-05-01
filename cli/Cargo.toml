@@ -1,6 +1,6 @@
 [package]
 name = "mkpe"
-version = "1.0.0-mkpe"
+version = "1.0.1-mkpe"
 edition = "2021"
 authors = ["Morse-Kirby Provenance Engine"]
 description = "MKPE command-line tool for signing, verifying, and managing provenance"
