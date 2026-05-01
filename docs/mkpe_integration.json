@@ -1,0 +1,209 @@
+{
+  "$schema": "https://kalyx.internal/schemas/mkpe_integration.schema.v1.json",
+  "manifest_id": "6260a764-7901-4997-9a85-898d728e760d",
+  "engine_version": "v1.0.0-mkpe",
+  "schema_version": "1.0.0",
+  "root_hash": "9b5041f701ba5279",
+  "canonical_location": "C:\\mkpe",
+  "required_startup_checks": [
+    {
+      "name": "engine_self_verification",
+      "description": "Verify canonical engine bundle is authentic and unmodified",
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "verify",
+        "C:\\mkpe\\mkpe_core_v1.0.0.mkpe"
+      ],
+      "success_exit": 0,
+      "failure_policy": "disable_provenance_mode_and_log",
+      "log_success_to": "operations_log",
+      "log_failure_to": "integrity_log"
+    }
+  ],
+  "bundle_commands": {
+    "keygen": {
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "keygen",
+        "--output",
+        "<keyfile>"
+      ],
+      "description": "Generate Ed25519 keypair"
+    },
+    "bundle": {
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "bundle",
+        "<path>",
+        "--output",
+        "<out>.mkpe"
+      ],
+      "description": "Create proof bundle from directory or file"
+    },
+    "sign": {
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "sign",
+        "<artifact>.mkpe",
+        "-k",
+        "<keyfile>"
+      ],
+      "description": "Sign bundle with Ed25519 private key"
+    },
+    "verify": {
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "verify",
+        "<artifact>.mkpe"
+      ],
+      "options": {
+        "json_output": ["--json", "--output", "<artifact>.verify.json"],
+        "detailed": ["-d"]
+      },
+      "description": "Verify bundle signature and integrity"
+    },
+    "inspect": {
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "inspect",
+        "<artifact>.mkpe"
+      ],
+      "options": {
+        "export_manifest": ["--export-manifest", "<manifest>.json"]
+      },
+      "description": "Inspect bundle contents without verification"
+    },
+    "hash": {
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "hash",
+        "<file>"
+      ],
+      "description": "Calculate SHA-256 hash of file"
+    },
+    "validate_cdna": {
+      "command": [
+        "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+        "validate-cdna",
+        "<schema>.cdna.json"
+      ],
+      "options": {
+        "generate_proof": ["--proof", "-k", "<keyfile>"]
+      },
+      "description": "Validate C-DNA schema and optionally generate proof"
+    }
+  },
+  "audit_paths": {
+    "integrity_log": "C:\\Kalyx\\MKPE\\audit\\integrity.log",
+    "operations_log": "C:\\Kalyx\\MKPE\\audit\\operations.log",
+    "rejections_log": "C:\\Kalyx\\MKPE\\audit\\rejections.log"
+  },
+  "policy": {
+    "verify_on_import": true,
+    "block_on_verify_failure": true,
+    "allow_offline_operation": true,
+    "phone_home": false,
+    "auto_update": false,
+    "require_user_confirmation": {
+      "sign": true,
+      "bundle": false,
+      "verify": false
+    },
+    "steganography_allowed": false,
+    "multi_signature_supported": false
+  },
+  "attestation": {
+    "enabled": false,
+    "attestation_file": "build_attestation.json",
+    "location": "C:\\mkpe\\attestation",
+    "expected_fields": [
+      "engine_manifest_id",
+      "engine_version",
+      "root_hash",
+      "build_fingerprint",
+      "timestamp_utc",
+      "signature"
+    ],
+    "verify_command": [
+      "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+      "verify-attestation",
+      "<attestation>.json",
+      "--pubkey",
+      "<public_key>"
+    ]
+  },
+  "steganography": {
+    "enabled": false,
+    "location": "C:\\mkpe\\stego",
+    "cli_tool": "C:\\mkpe\\stego\\mkpe_stego.exe",
+    "supported_formats": ["png", "jpg", "mp3", "mp4", "binary"],
+    "embed_command": [
+      "mkpe_stego.exe",
+      "embed",
+      "<asset>",
+      "--from-bundle",
+      "<bundle>.mkpe",
+      "--output",
+      "<asset_provenanced>"
+    ],
+    "extract_command": [
+      "mkpe_stego.exe",
+      "extract",
+      "<asset_provenanced>",
+      "--verify",
+      "<bundle>.mkpe"
+    ]
+  },
+  "update_rules": {
+    "allow_auto_update": false,
+    "require_signed_manifest": true,
+    "migration_signature_requirement": "dual_signature_supported",
+    "version_check_url": null,
+    "update_policy": "manual_only"
+  },
+  "monitoring": {
+    "integrity_check_script": "C:\\Kalyx\\MKPE\\tools\\Monitor-MKPEIntegrity.ps1",
+    "schedule": "daily",
+    "schedule_time": "09:00",
+    "alert_on_failure": true,
+    "alert_method": "log_only"
+  },
+  "platform_support": {
+    "windows": {
+      "supported": true,
+      "validated": true,
+      "min_version": "Windows 10.0"
+    },
+    "linux": {
+      "supported": true,
+      "validated": false,
+      "min_version": "kernel 4.0+"
+    },
+    "macos": {
+      "supported": true,
+      "validated": false,
+      "min_version": "macOS 12+"
+    }
+  },
+  "api_endpoints": {
+    "rust_crate": "morse_kirby_core",
+    "c_header": "morse_kirby.h",
+    "python_module": "mkpe_py",
+    "typescript_module": "@mkpe/core",
+    "status": "rust_only_v1.0"
+  },
+  "documentation": {
+    "integration_guide": "C:\\mkpe\\docs\\README_USAGE.md",
+    "format_spec": "C:\\mkpe\\docs\\format_spec_v1.0.md",
+    "freeze_manifest": "C:\\mkpe\\FREEZE_MANIFEST_v1.0.0.md",
+    "audit_report": "C:\\mkpe\\AUDIT_REPORT_v1.0.0.md"
+  },
+  "version_info": {
+    "policy_version": "1.0.0",
+    "last_updated": "2025-10-08T15:45:00Z",
+    "compatibility": "v1.0.x"
+  }
+}
+
+
+

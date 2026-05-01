@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "engine_manifest_id": "6260a764-7901-4997-9a85-898d728e760d",
+  "engine_version": "v1.0.0-mkpe",
+  "root_hash": "9b5041f701ba5279",
+  "build_fingerprint": {
+    "os": "Windows 10.0.26100",
+    "rustc_version": "1.81.0-stable",
+    "target_triple": "x86_64-pc-windows-msvc",
+    "rust_edition": "2021",
+    "compiler_flags": "--release",
+    "build_timestamp": "2025-10-08T15:00:00Z",
+    "dependencies": {
+      "ed25519-dalek": "2.2.0",
+      "sha2": "0.10.9",
+      "serde": "1.0.228",
+      "serde_json": "1.0.145",
+      "chrono": "0.4.42",
+      "base64": "0.21.7",
+      "hex": "0.4.3",
+      "uuid": "1.18.1",
+      "whoami": "1.6.1"
+    },
+    "total_source_files": 26,
+    "total_proofs": 1574,
+    "unit_tests_passed": 14
+  },
+  "timestamp_utc": "2025-10-08T15:45:00Z",
+  "attested_by": "Morse-Kirby Provenance Engine v1.0.0",
+  "freeze_artifacts": [
+    "canonical_hash.txt",
+    "canonical_hash.mkpe",
+    "mkpe_core_v1.0.0.mkpe",
+    "MKPE_v1.0.0_FROZEN.zip",
+    "FREEZE_MANIFEST_v1.0.0.md"
+  ],
+  "validation_platforms": [
+    {
+      "platform": "Windows",
+      "version": "10.0.26100",
+      "validated": true,
+      "report": "validation/baseline/windows_validation.json"
+    },
+    {
+      "platform": "Linux",
+      "validated": false,
+      "status": "pending"
+    },
+    {
+      "platform": "macOS",
+      "validated": false,
+      "status": "pending"
+    }
+  ],
+  "signature": "To be generated with mkpe sign build_attestation.json"
+}
+
+
+

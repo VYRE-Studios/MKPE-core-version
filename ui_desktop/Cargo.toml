@@ -1,0 +1,39 @@
+[package]
+name = "mkpe_desktop"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "mkpe_desktop"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.24", features = ["default"] }
+egui = "0.24"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+image = "0.24"
+rfd = "0.12"
+sha2 = "0.10"
+hostname = "0.3"
+
+# MKPE Core - Full provenance system
+morse_kirby_core = { path = "../core" }
+whoami = "1.4"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+hex = "0.4"
+
+# Encryption dependencies (commented out for now)
+# aes-gcm = "0.10"
+# pbkdf2 = "0.12"
+# rand = "0.8"
+# base64 = "0.21"
+# zip = "1.1"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "windef"] }
+
+[build-dependencies]
+winres = "0.1"
+

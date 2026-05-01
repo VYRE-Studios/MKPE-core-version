@@ -1,0 +1,20 @@
+[
+  {
+    "Timestamp": "2025-10-08 16:40:22 UTC",
+    "Source": "MKPE.Service",
+    "Message": "System initialized successfully",
+    "Level": "INFO"
+  },
+  {
+    "Timestamp": "2025-10-08 16:39:52 UTC",
+    "Source": "MKPE.Service",
+    "Message": "MKPE service started",
+    "Level": "INFO"
+  },
+  {
+    "Timestamp": "2025-10-08 16:39:22 UTC",
+    "Source": "MKPE.Config",
+    "Message": "Protected paths configured",
+    "Level": "INFO"
+  }
+]

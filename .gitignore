@@ -1,0 +1,24 @@
+# Secret material and local environment files
+secrets/
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+credentials.json
+MKPE_clone/
+
+# Build caches and dependency output
+target/
+node_modules/
+dist/
+build/
+__pycache__/
+*.pyc
+
+# Local editor and OS noise
+.DS_Store
+Thumbs.db

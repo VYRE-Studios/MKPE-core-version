@@ -1,0 +1,22 @@
+{
+  "Status": "Running",
+  "Monitoring": {
+    "MetricsCollection": true,
+    "HealthCheckInterval": 30,
+    "Enabled": true
+  },
+  "Port": 8082,
+  "SecretsVault": {
+    "Encrypted": true,
+    "Enabled": true,
+    "Path": "C:\\MKPE\\secrets\\vault.json"
+  },
+  "ServiceName": "MKPEIntegrityService",
+  "ProtectedPaths": [
+    "C:\\Users\\Admin\\Documents",
+    "C:\\Projects",
+    "C:\\MKPE\\secrets"
+  ],
+  "AutoStart": true,
+  "LogLevel": "INFO"
+}

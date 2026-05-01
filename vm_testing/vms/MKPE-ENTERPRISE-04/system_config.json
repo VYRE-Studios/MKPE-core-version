@@ -1,0 +1,23 @@
+{
+  "ChaosEvents": [],
+  "SystemLoad": {
+    "Disk": 0,
+    "Memory": 0,
+    "Network": 0,
+    "CPU": 0
+  },
+  "PerformanceMetrics": [],
+  "Role": "Enterprise Services",
+  "Status": "Deployed",
+  "IPAddress": "192.168.100.13",
+  "LastBoot": "2025-10-08 16:40:22 UTC",
+  "MKPEVersion": "1.0.0",
+  "Services": [
+    "DocuSign",
+    "AutoOTO",
+    "MKPE"
+  ],
+  "ErrorLog": [],
+  "ComputerName": "MKPE-ENTERPRISE-04",
+  "Uptime": 0
+}

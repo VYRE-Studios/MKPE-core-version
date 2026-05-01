@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <rect width="256" height="256" fill="#0A0A0A"/>
+  <polygon points="128,12 232,70 232,186 128,244 24,186 24,70"
+           fill="url(#metal)" stroke="url(#edge)" stroke-width="8"/>
+  <polygon points="128,36 210,84 210,172 128,220 46,172 46,84"
+           fill="url(#plate)" stroke="#0C0C0C" stroke-width="2"/>
+
+  <!-- Small core - just the origin point -->
+  <circle cx="128" cy="132" r="5" fill="#00FFFF"/>
+
+  <!-- Protection rings - pulsing all the way to the border -->
+  <!-- Ring 1 -->
+  <circle cx="128" cy="132" r="10" fill="none" stroke="url(#ring)" stroke-width="6">
+    <animate attributeName="r" values="10;130" dur="2.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="1;0" dur="2.5s" repeatCount="indefinite"/>
+    <animate attributeName="stroke-width" values="6;2" dur="2.5s" repeatCount="indefinite"/>
+  </circle>
+  
+  <!-- Ring 2 -->
+  <circle cx="128" cy="132" r="10" fill="none" stroke="url(#ring)" stroke-width="6">
+    <animate attributeName="r" values="10;130" dur="2.5s" begin="0.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.9;0" dur="2.5s" begin="0.5s" repeatCount="indefinite"/>
+    <animate attributeName="stroke-width" values="6;2" dur="2.5s" begin="0.5s" repeatCount="indefinite"/>
+  </circle>
+  
+  <!-- Ring 3 -->
+  <circle cx="128" cy="132" r="10" fill="none" stroke="url(#ring2)" stroke-width="6">
+    <animate attributeName="r" values="10;130" dur="2.5s" begin="1.0s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.8;0" dur="2.5s" begin="1.0s" repeatCount="indefinite"/>
+    <animate attributeName="stroke-width" values="6;2" dur="2.5s" begin="1.0s" repeatCount="indefinite"/>
+  </circle>
+  
+  <!-- Ring 4 -->
+  <circle cx="128" cy="132" r="10" fill="none" stroke="url(#ring2)" stroke-width="6">
+    <animate attributeName="r" values="10;130" dur="2.5s" begin="1.5s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.7;0" dur="2.5s" begin="1.5s" repeatCount="indefinite"/>
+    <animate attributeName="stroke-width" values="6;2" dur="2.5s" begin="1.5s" repeatCount="indefinite"/>
+  </circle>
+  
+  <!-- Ring 5 -->
+  <circle cx="128" cy="132" r="10" fill="none" stroke="url(#ring3)" stroke-width="6">
+    <animate attributeName="r" values="10;130" dur="2.5s" begin="2.0s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.6;0" dur="2.5s" begin="2.0s" repeatCount="indefinite"/>
+    <animate attributeName="stroke-width" values="6;2" dur="2.5s" begin="2.0s" repeatCount="indefinite"/>
+  </circle>
+
+  <defs>
+    <linearGradient id="metal" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4B4B4B"/><stop offset="100%" stop-color="#1A1A1A"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#CFCFCF"/><stop offset="100%" stop-color="#4A4A4A"/>
+    </linearGradient>
+    <linearGradient id="plate" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#141414"/><stop offset="100%" stop-color="#2A2A2A"/>
+    </linearGradient>
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00FFFF"/><stop offset="100%" stop-color="#003344"/>
+    </radialGradient>
+    <radialGradient id="ring" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00FFFF" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#004466" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ring2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00BFFF" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#001A33" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pulse" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00FFFF"/>
+      <stop offset="100%" stop-color="#0088CC"/>
+    </linearGradient>
+  </defs>
+</svg>
+

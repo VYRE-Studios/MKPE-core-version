@@ -1,0 +1,12 @@
+{
+  "service_config": {
+    "watch_paths": [
+      "C:\\Users\\jwhit\\Documents",
+      "C:\\Users\\jwhit\\Desktop"
+    ],
+    "scan_interval_seconds": 30,
+    "log_level": "INFO"
+  },
+  "version": "1.0.0",
+  "last_updated": "2025-10-08T23:32:00Z"
+}

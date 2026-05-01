@@ -1,0 +1,34 @@
+{
+  "mkpe_version": "1.0.0-mkpe",
+  "platform": "Windows",
+  "os_version": "10.0.26100",
+  "validation_date": "2025-10-08T15:30:00Z",
+  "canonical_hash_file": "canonical_hash.txt",
+  "canonical_hash_signature": "canonical_hash.mkpe",
+  "core_bundle": "mkpe_core_v1.0.0.mkpe",
+  "tests": {
+    "cli_functional": true,
+    "keygen_works": true,
+    "signing_works": true,
+    "bundle_creation": true,
+    "hash_calculation": true,
+    "cdna_validation": true
+  },
+  "artifacts": {
+    "cli_binary": "cli/target/release/mkpe.exe",
+    "core_library": "core/target/release/morse_kirby_core.lib",
+    "total_source_files": 26,
+    "total_proofs_in_core": 1574
+  },
+  "verification": {
+    "canonical_hash_verified": true,
+    "self_signature_valid": true,
+    "format_compliance": "v1.0 binary format"
+  },
+  "next_steps": [
+    "Test on Linux platform",
+    "Test on macOS platform",
+    "Cross-platform verification"
+  ]
+}
+

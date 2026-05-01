@@ -1,0 +1,7 @@
+MKPE Protection Test File
+========================
+Created: 10/08/2025 17:21:11
+Purpose: Verify file protection is working
+Test ID: 20251008_172111
+
+This file should be monitored by MKPE service.

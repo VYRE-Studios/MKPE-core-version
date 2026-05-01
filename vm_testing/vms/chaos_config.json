@@ -1,0 +1,53 @@
+{
+  "Targets": [
+    "MKPE-WORKSTATION-01",
+    "MKPE-TESTING-02",
+    "MKPE-CREATIVE-03",
+    "MKPE-ENTERPRISE-04",
+    "MKPE-MONITORING-05"
+  ],
+  "EventTypes": [
+    {
+      "Severity": "Low",
+      "Name": "NetworkLatency",
+      "Impact": "Response time increased",
+      "Description": "Simulate network latency",
+      "Duration": 30
+    },
+    {
+      "Severity": "High",
+      "Name": "ResourceExhaustion",
+      "Impact": "System performance degraded",
+      "Description": "Simulate high resource usage",
+      "Duration": 120
+    },
+    {
+      "Severity": "Medium",
+      "Name": "ServiceRestart",
+      "Impact": "Brief service interruption",
+      "Description": "Simulate service restart",
+      "Duration": 10
+    },
+    {
+      "Severity": "Critical",
+      "Name": "DataCorruption",
+      "Impact": "Data integrity compromised",
+      "Description": "Simulate data corruption event",
+      "Duration": 60
+    },
+    {
+      "Severity": "Critical",
+      "Name": "SecurityBreach",
+      "Impact": "Security systems activated",
+      "Description": "Simulate security breach attempt",
+      "Duration": 300
+    }
+  ],
+  "ChaosEngine": {
+    "LogLevel": "DEBUG",
+    "MaxConcurrentEvents": 3,
+    "AutoRecovery": true,
+    "TestInterval": 300,
+    "Enabled": true
+  }
+}

@@ -1,0 +1,128 @@
+import { Button, VerticalBox, HorizontalBox, ScrollView } from "std-widgets.slint";
+
+export component AppWindow inherits Window {
+    width: 480px;
+    height: 400px;
+    title: "Morse-Kirby Provenance Engine";
+
+    callback run_full_scan();
+    callback pause_service();
+    callback resume_service();
+    
+    in-out property <string> service_status: "Unknown";
+    in-out property <string> last_scan: "Never";
+    in-out property <int> files_checked: 0;
+    in-out property <int> errors_found: 0;
+    in-out property <string> log_text: "";
+    in-out property <bool> service_running: false;
+
+    background: #0a0a0a;
+
+    VerticalBox {
+        padding: 20px;
+        spacing: 15px;
+
+        // Header
+        Text {
+            text: "Morse-Kirby Provenance Engine";
+            color: #FF2E63;
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        // Status section
+        HorizontalBox {
+            spacing: 10px;
+            
+            Rectangle {
+                width: 12px;
+                height: 12px;
+                border-radius: 6px;
+                background: service-running ? #00ff00 : #808080;
+            }
+            
+            Text {
+                text: "Service: " + service-status;
+                color: #ffffff;
+                font-size: 14px;
+            }
+        }
+
+        Text {
+            text: "Last Scan: " + last-scan;
+            color: #cccccc;
+            font-size: 12px;
+        }
+
+        // Statistics
+        HorizontalBox {
+            spacing: 20px;
+            
+            Text {
+                text: "Files: " + files-checked;
+                color: #00ff00;
+                font-size: 12px;
+            }
+            
+            Text {
+                text: "Errors: " + errors-found;
+                color: errors-found > 0 ? #ff0000 : #00ff00;
+                font-size: 12px;
+            }
+        }
+
+        // Control buttons
+        HorizontalBox {
+            spacing: 10px;
+            
+            Button {
+                text: "Run Full Scan";
+                clicked => {
+                    root.run-full-scan();
+                }
+            }
+            
+            Button {
+                text: service-running ? "Pause" : "Resume";
+                clicked => {
+                    if (service-running) {
+                        root.pause-service();
+                    } else {
+                        root.resume-service();
+                    }
+                }
+            }
+        }
+
+        // Log viewer
+        Rectangle {
+            border-width: 1px;
+            border-color: #333333;
+            background: #1a1a1a;
+            height: 150px;
+            
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                viewport-width: 400px;
+                viewport-height: 300px;
+                
+                Text {
+                    text: log-text;
+                    color: #cccccc;
+                    font-size: 10px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // Footer
+        Text {
+            text: "MKPE v1.0.0-mkpe";
+            color: #666666;
+            font-size: 10px;
+            horizontal-alignment: center;
+        }
+    }
+}
+

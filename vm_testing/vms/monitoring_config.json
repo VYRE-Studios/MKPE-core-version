@@ -1,0 +1,90 @@
+{
+  "Dashboard": {
+    "Alerts": {
+      "CriticalThreshold": 90,
+      "WarningThreshold": 70,
+      "Enabled": true
+    },
+    "MaxDataPoints": 1000,
+    "Title": "MKPE System Monitoring",
+    "RefreshInterval": 5
+  },
+  "Metrics": [
+    {
+      "Target": 95,
+      "Name": "SystemHealth",
+      "Description": "Overall system health percentage",
+      "Unit": "%"
+    },
+    {
+      "Target": 100,
+      "Name": "ResponseTime",
+      "Description": "Average response time across all systems",
+      "Unit": "ms"
+    },
+    {
+      "Target": 1,
+      "Name": "ErrorRate",
+      "Description": "Error rate percentage",
+      "Unit": "%"
+    },
+    {
+      "Target": 0,
+      "Name": "ChaosEvents",
+      "Description": "Active chaos events count",
+      "Unit": "count"
+    }
+  ],
+  "Systems": [
+    {
+      "Name": "MKPE-WORKSTATION-01",
+      "IP": "192.168.100.10",
+      "Services": [
+        "MKPE",
+        "Calyx",
+        "Aetherion"
+      ],
+      "Role": "Primary Development"
+    },
+    {
+      "Name": "MKPE-TESTING-02",
+      "IP": "192.168.100.11",
+      "Services": [
+        "MKPE",
+        "FlowEditor",
+        "TTS"
+      ],
+      "Role": "Testing & Validation"
+    },
+    {
+      "Name": "MKPE-CREATIVE-03",
+      "IP": "192.168.100.12",
+      "Services": [
+        "CreativeOS",
+        "Zettlr",
+        "HybridEngine"
+      ],
+      "Role": "Creative Workstation"
+    },
+    {
+      "Name": "MKPE-ENTERPRISE-04",
+      "IP": "192.168.100.13",
+      "Services": [
+        "DocuSign",
+        "AutoOTO",
+        "MKPE"
+      ],
+      "Role": "Enterprise Services"
+    },
+    {
+      "Name": "MKPE-MONITORING-05",
+      "IP": "192.168.100.14",
+      "Services": [
+        "Monitoring",
+        "ChaosEngine",
+        "MKPE"
+      ],
+      "Role": "Monitoring & Chaos"
+    }
+  ]
+}
