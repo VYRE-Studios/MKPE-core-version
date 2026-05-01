@@ -1,7 +1,7 @@
 # MKPE Attestation Layer
 
-**Status**: 📋 DEFINED – Implementation Pending  
-**Version**: Planned for v1.1.0  
+**Status**: Implemented in v1.1.0
+**Version**: v1.1.0
 **Location**: `C:\mkpe\attestation\`
 
 ---
@@ -17,43 +17,50 @@ The attestation layer adds verifiable metadata about the **build environment** w
 ```
 build_attestation.json
  ├─ schema_version: "1.0"
- ├─ engine_manifest_id: "<uuid>"
- ├─ engine_version: "v1.0.0-mkpe"
- ├─ root_hash: "9b5041f701ba5279..."
+ ├─ attestation_id: "<uuid>"
+ ├─ subject_path: "./artifact"
+ ├─ subject_kind: "file|directory"
+ ├─ subject_sha256: "sha256..."
+ ├─ bundle_manifest_id: "<optional .mkpe manifest id>"
+ ├─ bundle_root_hash: "<optional .mkpe root hash>"
  ├─ build_fingerprint:
- │   ├─ os: "Windows 10.0.26100"
- │   ├─ rustc_version: "1.81.0-stable"
- │   ├─ target_triple: "x86_64-pc-windows-msvc"
- │   ├─ compiler_flags: "--release"
- │   ├─ dependencies_hash: "sha256:..."
- │   ├─ cpu: "AMD Ryzen 9"
- │   └─ memory_gb: 64
+ │   ├─ user: "builder"
+ │   ├─ platform: "Windows"
+ │   ├─ hostname: "build-host"
+ │   ├─ process_id: 1234
+ │   ├─ architecture: "x86_64"
+ │   ├─ mkpe_version: "1.1.0-mkpe"
+ │   └─ working_directory: "C:\\repo"
+ ├─ command: "cargo build --release"
  ├─ timestamp_utc: "2025-10-08T15:00:00Z"
  ├─ attested_by: "build_system_id"
+ ├─ signer_public_key: "<ed25519_public_key>"
  └─ signature: "<ed25519_signature>"
 ```
 
 ---
 
-## Proposed CLI (Future)
+## CLI
 
 ### Generate Attestation
 ```bash
-mkpe_attest generate \
-  --bundle mkpe_core_v1.0.0.mkpe \
-  --output build_attestation.json
+mkpe attest generate ./artifact \
+  --key ./keys/mkpe_private.key \
+  --bundle ./artifact.mkpe \
+  --output build_attestation.json \
+  --attested-by ci \
+  --command "cargo build --release"
 ```
 
 ### Sign Attestation
-```bash
-mkpe sign build_attestation.json -k engine.key
-```
+The attestation is signed during generation.
 
 ### Verify Attestation
 ```bash
-mkpe_attest verify build_attestation.json \
-  --pubkey engine_public.key \
-  --expect-root-hash 9b5041f701ba5279...
+mkpe attest verify build_attestation.json \
+  --subject ./artifact \
+  --bundle ./artifact.mkpe \
+  --public-key ./keys/mkpe_public.key
 ```
 
 ---
@@ -64,8 +71,8 @@ mkpe_attest verify build_attestation.json \
 
 ```
 1. Compile MKPE core → mkpe_core.lib
-2. Generate attestation → build_attestation.json
-3. Sign attestation → build_attestation.json.sig
+2. Generate and sign attestation → build_attestation.json
+3. Verify attestation against the artifact and trusted public key
 4. Include in freeze package
 ```
 
@@ -73,9 +80,10 @@ mkpe_attest verify build_attestation.json \
 
 ```
 1. Load attestation
-2. Verify signature
-3. Check root_hash matches installed engine
-4. Log attestation details
+2. Verify signature with trusted public key
+3. Recompute subject hash and compare it to `subject_sha256`
+4. Verify linked `.mkpe` sidecar proves the same subject when a bundle is linked
+5. Log attestation details
 ```
 
 ---
@@ -88,33 +96,41 @@ mkpe_attest verify build_attestation.json \
   "type": "object",
   "required": [
     "schema_version",
-    "engine_manifest_id",
-    "engine_version",
-    "root_hash",
+    "attestation_id",
+    "subject_path",
+    "subject_kind",
+    "subject_sha256",
     "build_fingerprint",
     "timestamp_utc",
+    "attested_by",
+    "signer_public_key",
     "signature"
   ],
   "properties": {
     "schema_version": { "type": "string", "const": "1.0" },
-    "engine_manifest_id": { "type": "string", "format": "uuid" },
-    "engine_version": { "type": "string", "pattern": "^v\\d+\\.\\d+\\.\\d+-mkpe$" },
-    "root_hash": { "type": "string", "pattern": "^[0-9a-f]+$" },
+    "attestation_id": { "type": "string", "format": "uuid" },
+    "subject_path": { "type": "string" },
+    "subject_kind": { "type": "string", "enum": ["file", "directory"] },
+    "subject_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "bundle_manifest_id": { "type": ["string", "null"], "format": "uuid" },
+    "bundle_root_hash": { "type": ["string", "null"], "pattern": "^[0-9a-f]+$" },
     "build_fingerprint": {
       "type": "object",
-      "required": ["os", "rustc_version", "target_triple"],
+      "required": ["user", "platform", "hostname", "process_id", "architecture", "mkpe_version", "working_directory"],
       "properties": {
-        "os": { "type": "string" },
-        "rustc_version": { "type": "string" },
-        "target_triple": { "type": "string" },
-        "compiler_flags": { "type": "string" },
-        "dependencies_hash": { "type": "string" },
-        "cpu": { "type": "string" },
-        "memory_gb": { "type": "number" }
+        "user": { "type": "string" },
+        "platform": { "type": "string" },
+        "hostname": { "type": "string" },
+        "process_id": { "type": "integer" },
+        "architecture": { "type": "string" },
+        "mkpe_version": { "type": "string" },
+        "working_directory": { "type": "string" }
       }
     },
+    "command": { "type": ["string", "null"] },
     "timestamp_utc": { "type": "string", "format": "date-time" },
     "attested_by": { "type": "string" },
+    "signer_public_key": { "type": "string" },
     "signature": { "type": "string" }
   }
 }
@@ -127,7 +143,8 @@ mkpe_attest verify build_attestation.json \
 ### What Attestation Proves
 - ✅ Build environment was recorded
 - ✅ Attestation signed by authorized key
-- ✅ Root hash matches engine bundle
+- ✅ Subject hash matches the current artifact
+- ✅ Linked `.mkpe` sidecar proves the same subject when provided
 - ✅ Timestamp is plausible
 
 ### What Attestation Does NOT Prove
@@ -160,7 +177,7 @@ mkpe_attest verify build_attestation.json \
 
 ---
 
-**Status**: Ready for implementation in v1.1.0
+**Status**: Implemented in v1.1.0
 
 
 

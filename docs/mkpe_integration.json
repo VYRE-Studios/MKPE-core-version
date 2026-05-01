@@ -1,7 +1,7 @@
 {
   "$schema": "https://kalyx.internal/schemas/mkpe_integration.schema.v1.json",
   "manifest_id": "6260a764-7901-4997-9a85-898d728e760d",
-  "engine_version": "v1.0.0-mkpe",
+  "engine_version": "v1.1.0-mkpe",
   "schema_version": "1.0.0",
   "root_hash": "9b5041f701ba5279",
   "canonical_location": "C:\\mkpe",
@@ -113,22 +113,35 @@
     "multi_signature_supported": false
   },
   "attestation": {
-    "enabled": false,
+    "enabled": true,
     "attestation_file": "build_attestation.json",
     "location": "C:\\mkpe\\attestation",
     "expected_fields": [
-      "engine_manifest_id",
-      "engine_version",
-      "root_hash",
+      "attestation_id",
+      "subject_path",
+      "subject_kind",
+      "subject_sha256",
       "build_fingerprint",
       "timestamp_utc",
+      "signer_public_key",
       "signature"
+    ],
+    "generate_command": [
+      "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
+      "attest",
+      "generate",
+      "<subject>",
+      "--key",
+      "<private_key>",
+      "--output",
+      "<attestation>.json"
     ],
     "verify_command": [
       "C:\\mkpe\\cli\\target\\release\\mkpe.exe",
-      "verify-attestation",
+      "attest",
+      "verify",
       "<attestation>.json",
-      "--pubkey",
+      "--public-key",
       "<public_key>"
     ]
   },
@@ -199,9 +212,9 @@
     "audit_report": "C:\\mkpe\\AUDIT_REPORT_v1.0.0.md"
   },
   "version_info": {
-    "policy_version": "1.0.0",
-    "last_updated": "2025-10-08T15:45:00Z",
-    "compatibility": "v1.0.x"
+    "policy_version": "1.1.0",
+    "last_updated": "2026-05-01T16:21:00Z",
+    "compatibility": "v1.1.x"
   }
 }
 

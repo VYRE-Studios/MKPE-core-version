@@ -1,6 +1,6 @@
 # Morse-Kirby Provenance Engine (MKPE) – Integration & Usage Guide
 
-**Version**: v1.0.0-mkpe  
+**Version**: v1.1.0-mkpe
 **Manifest ID**: `6260a764-7901-4997-9a85-898d728e760d`  
 **Root Hash**: `9b5041f701ba5279...`
 
@@ -86,12 +86,17 @@ mkpe.exe verify myproject_v1.0.mkpe --json --output verify_result.json
 }
 ```
 
-### 4. Attestation & Steganography (Optional)
+### 4. Attestation & Steganography
 
 **Attestation**:
-- Include `build_attestation.json` with build metadata
-- Sign attestation with same key as bundle
-- See `C:\mkpe\attestation\` for schema
+- Generate `build_attestation.json` with build metadata, subject hash, and optional `.mkpe` bundle linkage.
+- Verify attestation with the expected public key before trusting build provenance.
+- See `C:\mkpe\attestation\` for schema and workflow.
+
+```powershell
+mkpe.exe attest generate <artifact> --key <private_key> --bundle <artifact>.mkpe --output build_attestation.json
+mkpe.exe attest verify build_attestation.json --subject <artifact> --bundle <artifact>.mkpe --public-key <public_key>
+```
 
 **Steganography**:
 - Apply watermarks **after** `.mkpe` creation
@@ -200,6 +205,16 @@ mkpe.exe hash myfile.txt
 ### Validate C-DNA Schema
 ```bash
 mkpe.exe validate-cdna schema.cdna.json --proof -k project.key
+```
+
+### Generate Build Attestation
+```bash
+mkpe.exe attest generate C:\workspace\project --key project.key --bundle project.mkpe --output build_attestation.json --attested-by ci
+```
+
+### Verify Build Attestation
+```bash
+mkpe.exe attest verify build_attestation.json --subject C:\workspace\project --bundle project.mkpe --public-key project_public.key
 ```
 
 ---

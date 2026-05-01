@@ -117,6 +117,12 @@ enum Commands {
         #[command(subcommand)]
         command: DnaCommands,
     },
+
+    /// Build attestation commands for Layer 3 provenance
+    Attest {
+        #[command(subcommand)]
+        command: AttestCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,6 +162,59 @@ enum DnaCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AttestCommands {
+    /// Generate a signed build attestation JSON document
+    Generate {
+        /// Artifact file or folder to attest
+        subject: PathBuf,
+
+        /// Private key file
+        #[arg(short, long)]
+        key: PathBuf,
+
+        /// Output attestation JSON path
+        #[arg(short, long)]
+        output: PathBuf,
+
+        /// Optional linked .mkpe sidecar bundle
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+
+        /// Operator or build system identity
+        #[arg(long, default_value = "local")]
+        attested_by: String,
+
+        /// Build command to record in the attestation
+        #[arg(long)]
+        command: Option<String>,
+    },
+
+    /// Verify a signed build attestation JSON document
+    Verify {
+        /// Attestation JSON path
+        attestation: PathBuf,
+
+        /// Current subject file or folder to compare against the attestation
+        #[arg(long)]
+        subject: Option<PathBuf>,
+
+        /// Trusted public key expected to have signed the attestation
+        #[arg(long)]
+        public_key: Option<PathBuf>,
+
+        /// Optional linked .mkpe sidecar bundle
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+
+    /// Inspect an attestation JSON document
+    Inspect {
+        /// Attestation JSON path
+        attestation: PathBuf,
+    },
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -174,6 +233,7 @@ fn main() -> Result<()> {
         }
         Commands::Version => version_command(),
         Commands::Dna { command } => dna_command(command, cli.verbose, cli.format),
+        Commands::Attest { command } => attest_command(command, cli.format),
     }
 }
 
@@ -591,6 +651,205 @@ fn dna_command(command: DnaCommands, verbose: bool, format: OutputFormat) -> Res
     }
 
     Ok(())
+}
+
+fn attest_command(command: AttestCommands, format: OutputFormat) -> Result<()> {
+    match command {
+        AttestCommands::Generate {
+            subject,
+            key,
+            output,
+            bundle,
+            attested_by,
+            command,
+        } => {
+            let keypair = load_keypair(&key)?;
+            let attestation = create_build_attestation(
+                &subject,
+                &keypair,
+                AttestationOptions {
+                    attested_by,
+                    command,
+                    bundle_path: bundle,
+                },
+            )
+            .context("Failed to create build attestation")?;
+            let attestation_json = serde_json::to_string_pretty(&attestation)?;
+            std::fs::write(&output, attestation_json).context("Failed to write attestation")?;
+
+            if format == OutputFormat::Json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "status": "created",
+                        "attestation": output,
+                        "attestation_id": attestation.attestation_id,
+                        "subject": subject,
+                        "subject_sha256": attestation.subject_sha256,
+                        "bundle_manifest_id": attestation.bundle_manifest_id,
+                        "bundle_root_hash": attestation.bundle_root_hash,
+                    })
+                );
+            } else {
+                println!("{}", "Build attestation created".green().bold());
+                println!("  {} {}", "Subject:".bold(), subject.display());
+                println!("  {} {}", "Attestation:".bold(), output.display());
+                println!(
+                    "  {} {}",
+                    "Attestation ID:".bold(),
+                    attestation.attestation_id
+                );
+                println!(
+                    "  {} {}",
+                    "Subject SHA-256:".bold(),
+                    attestation.subject_sha256
+                );
+                if let Some(root_hash) = attestation.bundle_root_hash {
+                    println!("  {} {}", "Linked bundle root:".bold(), root_hash);
+                }
+            }
+        }
+        AttestCommands::Verify {
+            attestation,
+            subject,
+            public_key,
+            bundle,
+        } => {
+            let loaded = match load_attestation(&attestation) {
+                Ok(attestation) => attestation,
+                Err(error) => {
+                    emit_attest_verify_failure(&attestation, &error, format);
+                    std::process::exit(3);
+                }
+            };
+            let Some(public_key) = public_key.as_ref() else {
+                emit_attest_verify_failure(
+                    &attestation,
+                    &MkpeError::VerificationFailed(
+                        "Trusted public key is required for attestation verification".to_string(),
+                    ),
+                    format,
+                );
+                std::process::exit(3);
+            };
+            let trusted_public_key = match std::fs::read_to_string(public_key) {
+                Ok(public_key) => public_key,
+                Err(error) => {
+                    emit_attest_verify_failure(&attestation, &MkpeError::IoError(error), format);
+                    std::process::exit(3);
+                }
+            };
+
+            let verification = verify_build_attestation(
+                &loaded,
+                AttestationVerificationOptions {
+                    subject_path: subject.clone(),
+                    trusted_public_key: Some(trusted_public_key),
+                    bundle_path: bundle,
+                },
+            );
+
+            match verification {
+                Ok(report) => {
+                    if format == OutputFormat::Json {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "status": "verified",
+                                "attestation": attestation,
+                                "attestation_id": report.attestation_id,
+                                "subject_sha256": report.subject_sha256,
+                                "trusted_signer": report.trusted_signer,
+                                "signer_public_key": report.signer_public_key,
+                                "bundle_manifest_id": report.bundle_manifest_id,
+                                "bundle_root_hash": report.bundle_root_hash,
+                            })
+                        );
+                    } else {
+                        if report.trusted_signer {
+                            println!(
+                                "{}",
+                                "Attestation verification PASSED (trusted signer)"
+                                    .green()
+                                    .bold()
+                            );
+                        } else {
+                            println!(
+                                "{}",
+                                "Attestation integrity PASSED (signer not trust-pinned)"
+                                    .yellow()
+                                    .bold()
+                            );
+                        }
+                        println!("  {} {}", "Attestation:".bold(), attestation.display());
+                        if let Some(subject) = subject {
+                            println!("  {} {}", "Subject:".bold(), subject.display());
+                        }
+                        println!("  {} {}", "Subject SHA-256:".bold(), report.subject_sha256);
+                    }
+                }
+                Err(error) => {
+                    let code = if matches!(error, MkpeError::VerificationFailed(_)) {
+                        2
+                    } else {
+                        3
+                    };
+                    emit_attest_verify_failure(&attestation, &error, format);
+                    std::process::exit(code);
+                }
+            }
+        }
+        AttestCommands::Inspect { attestation } => {
+            let loaded = load_attestation(&attestation)?;
+            if format == OutputFormat::Json {
+                println!("{}", serde_json::to_string(&loaded)?);
+            } else {
+                println!(
+                    "{} {}",
+                    "Inspecting attestation:".bold().cyan(),
+                    attestation.display()
+                );
+                println!("  {} {}", "Attestation ID:".bold(), loaded.attestation_id);
+                println!("  {} {}", "Subject:".bold(), loaded.subject_path);
+                println!("  {} {:?}", "Subject kind:".bold(), loaded.subject_kind);
+                println!("  {} {}", "Subject SHA-256:".bold(), loaded.subject_sha256);
+                println!("  {} {}", "Attested by:".bold(), loaded.attested_by);
+                println!(
+                    "  {} {}",
+                    "Signer public key:".bold(),
+                    loaded.signer_public_key
+                );
+                if let Some(root_hash) = loaded.bundle_root_hash {
+                    println!("  {} {}", "Linked bundle root:".bold(), root_hash);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn load_attestation(path: &PathBuf) -> morse_kirby_core::Result<BuildAttestation> {
+    let content = std::fs::read_to_string(path)?;
+    Ok(serde_json::from_str(&content)?)
+}
+
+fn emit_attest_verify_failure(attestation: &PathBuf, error: &MkpeError, format: OutputFormat) {
+    if format == OutputFormat::Json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "failed",
+                "attestation": attestation,
+                "reason": error.to_string(),
+            })
+        );
+        return;
+    }
+
+    println!("{}", "Attestation verification FAILED".red().bold());
+    println!("  {} {}", "Attestation:".bold(), attestation.display());
+    println!("  {} {}", "Reason:".bold(), error);
 }
 
 fn emit_dna_verify_failure(

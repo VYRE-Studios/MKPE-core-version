@@ -60,6 +60,15 @@ Inspect a proof bundle:
 mkpe dna inspect .\artifact-folder.mkpe
 ```
 
+Generate and verify a build attestation for the same artifact:
+
+```powershell
+mkpe attest generate .\artifact-folder --key .\keys\mkpe_private.key --bundle .\artifact-folder.mkpe --output .\build_attestation.json --attested-by ci --command "cargo build --release"
+mkpe attest verify .\build_attestation.json --subject .\artifact-folder --bundle .\artifact-folder.mkpe --public-key .\keys\mkpe_public.key
+```
+
+Attestations are signed JSON documents that bind the subject hash, optional `.mkpe` bundle identity, build fingerprint, timestamp, command metadata, and signer identity.
+
 The legacy commands remain available:
 
 ```powershell
@@ -122,7 +131,7 @@ Layer 2: Integration and Monitoring
   CLI workflows, watched-folder service, audit logs, policy enforcement
 
 Layer 3: Build Attestation
-  Planned build environment and reproducibility proof
+  Signed build metadata and subject hash verification
 
 Layer 4: Embedded DNA Tags
   Planned steganographic and format-specific embedded proof fingerprints

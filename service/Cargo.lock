@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "mkpe_service"
-version = "1.0.2-mkpe"
+version = "1.1.0-mkpe"
 dependencies = [
  "anyhow",
  "chrono",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "morse_kirby_core"
-version = "1.0.2-mkpe"
+version = "1.1.0-mkpe"
 dependencies = [
  "base64",
  "chrono",
