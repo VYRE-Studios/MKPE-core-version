@@ -40,10 +40,16 @@ Create a DNA proof for a file or folder:
 mkpe dna create .\artifact-folder --key .\keys\mkpe_private.key --output .\artifact-folder.mkpe
 ```
 
-Verify the current bytes against the sidecar proof:
+Verify the current bytes against the sidecar proof and pin the expected signer:
 
 ```powershell
-mkpe dna verify .\artifact-folder --bundle .\artifact-folder.mkpe
+mkpe dna verify .\artifact-folder --bundle .\artifact-folder.mkpe --public-key .\keys\mkpe_public.key
+```
+
+For scripts and agents, use JSON output:
+
+```powershell
+mkpe --format json dna verify .\artifact-folder --bundle .\artifact-folder.mkpe --public-key .\keys\mkpe_public.key
 ```
 
 Inspect a proof bundle:
@@ -66,7 +72,7 @@ mkpe validate-cdna .\schema.cdna.json
 
 The Windows service can scan protected folders and enforce sidecar DNA proofs:
 
-- New files receive `.mkpe` sidecars when a service signing key is configured.
+- New files receive sidecars when a service signing key is configured. File sidecars preserve the full filename, for example `report.txt.mkpe`.
 - Existing sidecars are verified against current file bytes.
 - Tampered files are written to the audit log as verification failures.
 - Missing sidecars are rejected when auto-proving is disabled or no signing key is configured.
@@ -133,6 +139,6 @@ Layer 4: Embedded DNA Tags
 
 ## Security Model
 
-MKPE proves integrity and provenance for bytes covered by a signed proof bundle. It does not claim that an artifact is safe to execute, legally owned, or semantically correct. Trust still depends on key custody, policy enforcement, and downstream systems refusing failed verification results.
+MKPE proves integrity and provenance for bytes covered by a signed proof bundle. A self-contained bundle proves internal consistency; trusted authenticity requires binding verification to an expected public key with `--public-key` or an equivalent trust store. MKPE does not claim that an artifact is safe to execute, legally owned, or semantically correct.
 
 Use sidecar `.mkpe` bundles as the authoritative proof. Use embedded tags later as a durability layer for assets that leave your control.

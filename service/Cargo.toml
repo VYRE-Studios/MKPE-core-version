@@ -1,6 +1,6 @@
 [package]
 name = "mkpe_service"
-version = "1.0.0-mkpe"
+version = "1.0.1-mkpe"
 edition = "2021"
 authors = ["Morse-Kirby Provenance Engine"]
 description = "MKPE background integrity verification service"
@@ -40,6 +40,9 @@ ctrlc = "3.4"
 # Error handling
 anyhow = "1"
 thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"
 
 # Windows-specific
 [target.'cfg(windows)'.dependencies]

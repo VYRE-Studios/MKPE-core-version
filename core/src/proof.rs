@@ -181,8 +181,10 @@ pub fn create_recursive_proofs<P: AsRef<Path>>(
     keypair: &crate::crypto::KeyPair,
 ) -> Result<Vec<ProofItem>> {
     let mut proofs = Vec::new();
+    let root = dir_path.as_ref();
 
     fn visit_dirs(
+        root: &Path,
         dir: &Path,
         proofs: &mut Vec<ProofItem>,
         keypair: &crate::crypto::KeyPair,
@@ -192,9 +194,10 @@ pub fn create_recursive_proofs<P: AsRef<Path>>(
                 let entry = entry?;
                 let path = entry.path();
                 if path.is_dir() {
-                    visit_dirs(&path, proofs, keypair)?;
+                    visit_dirs(root, &path, proofs, keypair)?;
                 } else {
-                    let proof = create_proof_item(&path, keypair)?;
+                    let mut proof = create_proof_item(&path, keypair)?;
+                    proof.path = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
                     proofs.push(proof);
                 }
             }
@@ -202,7 +205,8 @@ pub fn create_recursive_proofs<P: AsRef<Path>>(
         Ok(())
     }
 
-    visit_dirs(dir_path.as_ref(), &mut proofs, keypair)?;
+    visit_dirs(root, root, &mut proofs, keypair)?;
+    proofs.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(proofs)
 }
 
@@ -268,6 +272,30 @@ mod tests {
 
         let is_valid = verify_proof_bundle(&bundle, &keypair.public_key)?;
         assert!(is_valid);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_recursive_proofs_use_relative_sorted_paths() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+
+        let nested_dir = temp_dir.path().join("b");
+        std::fs::create_dir(&nested_dir)?;
+        std::fs::write(nested_dir.join("nested.txt"), b"nested")?;
+        std::fs::write(temp_dir.path().join("a.txt"), b"root")?;
+
+        let proofs = create_recursive_proofs(temp_dir.path(), &keypair)?;
+        let paths: Vec<PathBuf> = proofs.iter().map(|proof| proof.path.clone()).collect();
+
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("b").join("nested.txt")
+            ]
+        );
 
         Ok(())
     }

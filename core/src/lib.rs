@@ -27,7 +27,9 @@ pub mod manifest;
 pub mod proof;
 
 pub use audit::{AuditEvent, AuditEventType, AuditLog};
-pub use bundle::{create_mkpe_bundle, ArtifactVerificationReport, MkpeArchive};
+pub use bundle::{
+    create_mkpe_bundle, default_sidecar_path, ArtifactVerificationReport, MkpeArchive,
+};
 pub use cdna::{CdnaEdge, CdnaNode, CdnaSchema};
 pub use crypto::{generate_keypair, KeyPair};
 pub use error::{MkpeError, Result};
