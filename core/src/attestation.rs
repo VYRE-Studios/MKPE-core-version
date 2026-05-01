@@ -15,6 +15,7 @@ pub enum AttestationSubjectKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildFingerprint {
     pub user: String,
     pub platform: String,
@@ -66,6 +67,7 @@ pub struct AttestationVerificationOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BuildAttestation {
     pub schema_version: String,
     pub attestation_id: String,
@@ -141,6 +143,7 @@ pub fn create_build_attestation(
     let (bundle_manifest_id, bundle_root_hash) = match options.bundle_path.as_ref() {
         Some(bundle_path) => {
             let archive = MkpeArchive::load(bundle_path)?;
+            archive.verify_artifact_with_public_key(subject_path, &keypair.public_key)?;
             (
                 Some(archive.manifest.manifest_id),
                 Some(archive.manifest.bundle_root_hash),
@@ -199,6 +202,14 @@ pub fn verify_build_attestation(
     }
 
     if let Some(subject_path) = options.subject_path.as_ref() {
+        let current_kind = subject_kind(subject_path)?;
+        if current_kind != attestation.subject_kind {
+            return Err(MkpeError::VerificationFailed(format!(
+                "Subject kind mismatch: expected {:?}, got {:?}",
+                attestation.subject_kind, current_kind
+            )));
+        }
+
         let current_hash = hash_subject(subject_path)?;
         if current_hash != attestation.subject_sha256 {
             return Err(MkpeError::VerificationFailed(format!(
@@ -208,7 +219,11 @@ pub fn verify_build_attestation(
         }
     }
 
-    verify_linked_bundle(attestation, options.bundle_path.as_deref())?;
+    verify_linked_bundle(
+        attestation,
+        options.bundle_path.as_deref(),
+        options.subject_path.as_deref(),
+    )?;
 
     Ok(AttestationVerificationReport {
         attestation_id: attestation.attestation_id.clone(),
@@ -258,7 +273,7 @@ fn hash_directory(root: &Path) -> Result<String> {
 
     let mut hasher = Sha256::new();
     for (relative_path, file_hash) in entries {
-        hasher.update(relative_path.to_string_lossy().as_bytes());
+        hasher.update(canonical_relative_path(&relative_path)?.as_bytes());
         hasher.update([0]);
         hasher.update(file_hash.as_bytes());
         hasher.update([0]);
@@ -279,16 +294,34 @@ fn collect_directory_entries(
             collect_directory_entries(root, &path, entries)?;
             continue;
         }
-        if path.file_name().and_then(|name| name.to_str()) == Some(".mkpe") {
-            continue;
-        }
         let relative_path = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
         entries.push((relative_path, hash_subject(&path)?));
     }
     Ok(())
 }
 
-fn verify_linked_bundle(attestation: &BuildAttestation, bundle_path: Option<&Path>) -> Result<()> {
+fn canonical_relative_path(path: &Path) -> Result<String> {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(MkpeError::VerificationFailed(format!(
+                    "Unsupported path component in attestation subject: {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+fn verify_linked_bundle(
+    attestation: &BuildAttestation,
+    bundle_path: Option<&Path>,
+    subject_path: Option<&Path>,
+) -> Result<()> {
     if attestation.bundle_manifest_id.is_none() && attestation.bundle_root_hash.is_none() {
         return Ok(());
     }
@@ -299,6 +332,13 @@ fn verify_linked_bundle(attestation: &BuildAttestation, bundle_path: Option<&Pat
         )
     })?;
     let archive = MkpeArchive::load(bundle_path)?;
+
+    let subject_path = subject_path.ok_or_else(|| {
+        MkpeError::VerificationFailed(
+            "Attestation links to a MKPE bundle, but no subject path was provided".to_string(),
+        )
+    })?;
+    archive.verify_artifact_with_public_key(subject_path, &attestation.signer_public_key)?;
 
     if attestation.bundle_manifest_id.as_deref() != Some(archive.manifest.manifest_id.as_str()) {
         return Err(MkpeError::VerificationFailed(

@@ -722,11 +722,17 @@ fn attest_command(command: AttestCommands, format: OutputFormat) -> Result<()> {
                     std::process::exit(3);
                 }
             };
-            let trusted_public_key = match public_key
-                .as_ref()
-                .map(std::fs::read_to_string)
-                .transpose()
-            {
+            let Some(public_key) = public_key.as_ref() else {
+                emit_attest_verify_failure(
+                    &attestation,
+                    &MkpeError::VerificationFailed(
+                        "Trusted public key is required for attestation verification".to_string(),
+                    ),
+                    format,
+                );
+                std::process::exit(3);
+            };
+            let trusted_public_key = match std::fs::read_to_string(public_key) {
                 Ok(public_key) => public_key,
                 Err(error) => {
                     emit_attest_verify_failure(&attestation, &MkpeError::IoError(error), format);
@@ -738,7 +744,7 @@ fn attest_command(command: AttestCommands, format: OutputFormat) -> Result<()> {
                 &loaded,
                 AttestationVerificationOptions {
                     subject_path: subject.clone(),
-                    trusted_public_key: trusted_public_key,
+                    trusted_public_key: Some(trusted_public_key),
                     bundle_path: bundle,
                 },
             );
