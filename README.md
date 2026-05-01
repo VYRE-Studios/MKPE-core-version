@@ -40,6 +40,8 @@ Create a DNA proof for a file or folder:
 mkpe dna create .\artifact-folder --key .\keys\mkpe_private.key --output .\artifact-folder.mkpe
 ```
 
+If the sidecar is written inside the protected folder, it must use the reserved default name `.mkpe`; other in-folder output names are rejected so the proof file cannot appear as an unproven payload during verification.
+
 Verify the current bytes against the sidecar proof and pin the expected signer:
 
 ```powershell

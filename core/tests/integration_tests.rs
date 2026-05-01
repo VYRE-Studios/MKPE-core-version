@@ -8,6 +8,8 @@ use tempfile::TempDir;
 #[test]
 fn test_complete_workflow() -> Result<()> {
     let temp_dir = TempDir::new()?;
+    let artifact_dir = temp_dir.path().join("artifact");
+    fs::create_dir(&artifact_dir)?;
 
     // 1. Generate keypair
     let keypair = generate_keypair();
@@ -17,13 +19,13 @@ fn test_complete_workflow() -> Result<()> {
     // 2. Create test files
     for i in 0..5 {
         fs::write(
-            temp_dir.path().join(format!("file{}.txt", i)),
+            artifact_dir.join(format!("file{}.txt", i)),
             format!("Content {}", i),
         )?;
     }
 
     // 3. Create proofs
-    let proofs = create_recursive_proofs(temp_dir.path(), &keypair)?;
+    let proofs = create_recursive_proofs(&artifact_dir, &keypair)?;
     assert_eq!(proofs.len(), 5);
 
     // 4. Create bundle
@@ -44,7 +46,7 @@ fn test_complete_workflow() -> Result<()> {
 
     // 7. Create archive
     let archive_path = temp_dir.path().join("test.mkpe");
-    create_mkpe_bundle(temp_dir.path(), &keypair, &archive_path)?;
+    create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
 
     // 8. Load and verify archive
     let loaded = MkpeArchive::load(&archive_path)?;
