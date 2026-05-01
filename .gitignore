@@ -11,6 +11,9 @@ secrets/
 credentials.json
 MKPE_clone/
 
+# Local Cursor hook runtime state
+.cursor/hooks/state/
+
 # Build caches and dependency output
 target/
 node_modules/
