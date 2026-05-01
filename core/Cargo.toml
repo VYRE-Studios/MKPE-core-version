@@ -1,6 +1,6 @@
 [package]
 name = "morse_kirby_core"
-version = "1.0.2-mkpe"
+version = "1.1.0-mkpe"
 edition = "2021"
 authors = ["Morse-Kirby Provenance Engine"]
 description = "Canonical Morse-Kirby Provenance Engine - Cryptographic verification core"

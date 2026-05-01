@@ -1,7 +1,7 @@
 # MKPE Attestation Layer
 
-**Status**: 📋 DEFINED – Implementation Pending  
-**Version**: Planned for v1.1.0  
+**Status**: Implemented in v1.1.0
+**Version**: v1.1.0
 **Location**: `C:\mkpe\attestation\`
 
 ---
@@ -35,25 +35,27 @@ build_attestation.json
 
 ---
 
-## Proposed CLI (Future)
+## CLI
 
 ### Generate Attestation
 ```bash
-mkpe_attest generate \
-  --bundle mkpe_core_v1.0.0.mkpe \
-  --output build_attestation.json
+mkpe attest generate ./artifact \
+  --key ./keys/mkpe_private.key \
+  --bundle ./artifact.mkpe \
+  --output build_attestation.json \
+  --attested-by ci \
+  --command "cargo build --release"
 ```
 
 ### Sign Attestation
-```bash
-mkpe sign build_attestation.json -k engine.key
-```
+The attestation is signed during generation.
 
 ### Verify Attestation
 ```bash
-mkpe_attest verify build_attestation.json \
-  --pubkey engine_public.key \
-  --expect-root-hash 9b5041f701ba5279...
+mkpe attest verify build_attestation.json \
+  --subject ./artifact \
+  --bundle ./artifact.mkpe \
+  --public-key ./keys/mkpe_public.key
 ```
 
 ---
@@ -64,8 +66,8 @@ mkpe_attest verify build_attestation.json \
 
 ```
 1. Compile MKPE core → mkpe_core.lib
-2. Generate attestation → build_attestation.json
-3. Sign attestation → build_attestation.json.sig
+2. Generate and sign attestation → build_attestation.json
+3. Verify attestation against the artifact and trusted public key
 4. Include in freeze package
 ```
 
@@ -160,7 +162,7 @@ mkpe_attest verify build_attestation.json \
 
 ---
 
-**Status**: Ready for implementation in v1.1.0
+**Status**: Implemented in v1.1.0
 
 
 

@@ -18,6 +18,7 @@
 //! - Self-verifying manifests
 //! - .mkpe archive format
 
+pub mod attestation;
 pub mod audit;
 pub mod bundle;
 pub mod cdna;
@@ -26,6 +27,11 @@ pub mod error;
 pub mod manifest;
 pub mod proof;
 
+pub use attestation::{
+    create_build_attestation, hash_subject, verify_build_attestation, AttestationOptions,
+    AttestationSubjectKind, AttestationVerificationOptions, AttestationVerificationReport,
+    BuildAttestation, BuildFingerprint,
+};
 pub use audit::{AuditEvent, AuditEventType, AuditLog};
 pub use bundle::{
     create_mkpe_bundle, default_sidecar_path, ArtifactVerificationReport, MkpeArchive,
@@ -40,7 +46,7 @@ pub use proof::{
 };
 
 /// MKPE version constant
-pub const MKPE_VERSION: &str = "1.0.2-mkpe";
+pub const MKPE_VERSION: &str = "1.1.0-mkpe";
 
 /// MKPE schema version
 pub const SCHEMA_VERSION: &str = "1.0.0";
