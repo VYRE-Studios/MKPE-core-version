@@ -31,7 +31,7 @@ MKPE uses a **layered architecture** where each layer adds functionality without
 │   Layer 3: Attestation (optional)               │
 │   Build environment verification                 │
 │   Location: C:\mkpe\attestation\                │
-│   Status: DEFINED, not implemented              │
+│   Status: ✅ COMPLETE (core/src/attestation.rs)      │
 └─────────────────────────────────────────────────┘
                      ↓
 ┌─────────────────────────────────────────────────┐
@@ -173,7 +173,7 @@ mkpe_attest.exe verify build_attestation.json --pubkey engine_public.key
 ```
 
 ### Status
-📋 **DEFINED** – Schema ready, implementation pending  
+✅ **COMPLETE** – Implemented in `core/src/attestation.rs` with full test coverage (10 tests)
 **Next Step**: Implement `mkpe_attest` CLI tool
 
 ---
@@ -313,7 +313,7 @@ C:\Kalyx\MKPE\                    # System installation
 - [x] Monitoring scripts
 
 ### v1.1.0 (Future)
-- [ ] Attestation layer
+- [x] Attestation layer (✅ complete in core/src/attestation.rs)
 - [ ] Enhanced audit logging
 - [ ] Multi-signature support
 - [ ] Cross-platform validation

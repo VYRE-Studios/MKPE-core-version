@@ -141,12 +141,13 @@ Package Hash: F80746656B64640695CAE2BA2F59156064FC63C30C3FFE268F0C46EFB602BC1E
 6. `tools/Verify-CIReport.ps1` - CI report verifier
 7. `service/Monitor-MKPEIntegrity.ps1` - Daily monitoring
 
-### Rust Tests (Planned)
-- `tests/manifest_signing.rs` - Manifest signing tests
-- `tests/live_manifest_check.rs` - Real manifest validation
-- `tests/preflight_ci_verifier.rs` - CI gatekeeper
-- Core unit tests (14 existing)
 
+### Rust Tests ✅
+- Core unit tests: 30+ passing
+- Attestation tests: 10 passing
+- CLI attestation tests: 6 passing
+- Integration tests: 2 passing
+- Verification tests: 2 passing
 ### Installer
 - `installer/MKPE_SystemSetup.iss` - Inno Setup script
 

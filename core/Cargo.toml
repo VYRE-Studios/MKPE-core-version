@@ -29,6 +29,10 @@ base64 = "0.21"
 hex = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+aes-gcm = "0.10"
+zstd = "0.13"
+png = "0.17"
+ureq = "2"
 # System info
 whoami = "1.4"
 

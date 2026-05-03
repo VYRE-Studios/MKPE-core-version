@@ -17,6 +17,16 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+
+use rand::RngCore;
+const NONCE_SIZE: usize = 12;
+const KEY_SIZE: usize = 32;
+const PBKDF2_ITERATIONS: u32 = 600_000;
+
 /// Wrapper ensuring an archive has been verified
 #[derive(Debug, Clone)]
 pub struct VerifiedMkpeArchive(MkpeArchive);
@@ -85,6 +95,11 @@ impl MkpeHeader {
             reserved: [0, 0],
         }
     }
+
+    pub fn is_encrypted(&self) -> bool { self.flags & FLAG_ENCRYPTED != 0 }
+    pub fn set_encrypted(&mut self) { self.flags |= FLAG_ENCRYPTED; }
+    pub fn is_compressed(&self) -> bool { self.flags & FLAG_COMPRESSED != 0 }
+    pub fn set_compressed(&mut self) { self.flags |= FLAG_COMPRESSED; }
 
     /// Serialize header to bytes
     pub fn to_bytes(&self) -> [u8; 32] {
@@ -235,6 +250,109 @@ impl MkpeArchive {
         Ok(())
     }
 
+
+    /// Save archive with AES-256-GCM encryption
+    pub fn save_with_encryption<P: AsRef<Path>>(
+        &self,
+        path: P,
+        keypair: &crate::crypto::KeyPair,
+        password: &str,
+    ) -> Result<()> {
+        let mut file = File::create(path)?;
+
+        let manifest_json = serde_json::to_vec(&self.manifest)?;
+        let proof_data = self.serialize_proof_section()?;
+
+        // Concatenate manifest + proof for encryption
+        let mut plaintext = Vec::new();
+        plaintext.extend_from_slice(&manifest_json);
+        plaintext.extend_from_slice(&proof_data);
+
+        // Derive key from password
+        let key_bytes = derive_key_from_password(password);
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|_| MkpeError::BundleError("Invalid key length".to_string()))?;
+
+        // Generate random nonce
+        let mut nonce_bytes = [0u8; NONCE_SIZE];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // Encrypt
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext.as_ref())
+            .map_err(|e| MkpeError::BundleError(format!("Encryption failed: {}", e)))?;
+
+        // Signature over original manifest + proof (before encryption)
+        let signature_block = self.create_signature_block(&manifest_json, &proof_data, keypair)?;
+
+        // Header: nonce stored as manifest section, ciphertext as proof section
+        let mut header = MkpeHeader::new(
+            nonce_bytes.len() as u64,
+            ciphertext.len() as u64,
+            signature_block.len() as u64,
+        );
+        header.set_encrypted();
+
+        let header_bytes = header.to_bytes();
+
+        // CRC32
+        let crc32 = calculate_crc32(&[&header_bytes, &nonce_bytes, &ciphertext, &signature_block]);
+
+        let footer = MkpeFooter::new(crc32);
+        let footer_bytes = footer.to_bytes();
+
+        file.write_all(&header_bytes)?;
+        file.write_all(&nonce_bytes)?;
+        file.write_all(&ciphertext)?;
+        file.write_all(&signature_block)?;
+        file.write_all(&footer_bytes)?;
+
+        Ok(())
+    }
+
+    /// Save archive with zstd compression
+    pub fn save_compressed<P: AsRef<Path>>(
+        &self,
+        path: P,
+        keypair: &crate::crypto::KeyPair,
+    ) -> Result<()> {
+        let mut file = File::create(path)?;
+
+        let manifest_json = serde_json::to_vec(&self.manifest)?;
+        let proof_data = self.serialize_proof_section()?;
+
+        // Compress proof data
+        let compressed_proof = zstd::encode_all(proof_data.as_slice(), 3)
+            .map_err(|e| MkpeError::BundleError(format!("Compression failed: {}", e)))?;
+
+        // Signature is over ORIGINAL (uncompressed) proof_data
+        let signature_block = self.create_signature_block(&manifest_json, &proof_data, keypair)?;
+
+        let mut header = MkpeHeader::new(
+            manifest_json.len() as u64,
+            compressed_proof.len() as u64,
+            signature_block.len() as u64,
+        );
+        header.set_compressed();
+
+        let header_bytes = header.to_bytes();
+
+        // CRC32 over compressed content
+        let crc32 = calculate_crc32(&[&header_bytes, &manifest_json, &compressed_proof, &signature_block]);
+
+        let footer = MkpeFooter::new(crc32);
+        let footer_bytes = footer.to_bytes();
+
+        file.write_all(&header_bytes)?;
+        file.write_all(&manifest_json)?;
+        file.write_all(&compressed_proof)?;
+        file.write_all(&signature_block)?;
+        file.write_all(&footer_bytes)?;
+
+        Ok(())
+    }
+
     /// Serialize proof section with full proof metadata.
     fn serialize_proof_section(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(&self.bundles).map_err(MkpeError::from)
@@ -300,7 +418,6 @@ impl MkpeArchive {
         let header = MkpeHeader::from_bytes(&header_bytes)?;
 
         // Verify version
-        // Verify version
         if header.version != FORMAT_VERSION && header.version != FORMAT_VERSION_V1 {
             return Err(MkpeError::BundleError(format!(
                 "Unsupported format version: {}",
@@ -345,14 +462,108 @@ impl MkpeArchive {
             ));
         }
 
+        // Encrypted archives must use load_with_decryption
+        if header.is_encrypted() {
+            return Err(MkpeError::BundleError(
+                "Archive is encrypted. Use load_with_decryption() instead.".to_string(),
+            ));
+        }
+
         // Deserialize manifest
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes)?;
 
+        // Handle compression: decompress proof_bytes before parsing
+        let (proof_for_parsing, proof_for_signature) = if header.is_compressed() {
+            let decompressed = zstd::decode_all(proof_bytes.as_slice())
+                .map_err(|e| MkpeError::BundleError(format!("Decompression failed: {}", e)))?;
+            (decompressed.clone(), decompressed)
+        } else {
+            (proof_bytes.clone(), proof_bytes)
+        };
+
         // Parse proof section
-        let bundles = Self::deserialize_proof_section(&proof_bytes, &manifest)?;
+        let bundles = Self::deserialize_proof_section(&proof_for_parsing, &manifest)?;
+
+        // Verify signature against ORIGINAL (uncompressed) data
+        Self::verify_signature_block(&manifest_bytes, &proof_for_signature, &signature_bytes, &manifest)?;
+
+        Ok(MkpeArchive {
+            manifest,
+            bundles,
+            created_at: chrono::Utc::now(),
+            format_version: "1.0.0".to_string(),
+        })
+    }
+
+
+    /// Load encrypted archive with password decryption
+    pub fn load_with_decryption<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
+        let mut file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+
+        let mut header_bytes = [0u8; 32];
+        file.read_exact(&mut header_bytes)?;
+        let header = MkpeHeader::from_bytes(&header_bytes)?;
+
+        if !header.is_encrypted() {
+            return Err(MkpeError::BundleError(
+                "Archive is not encrypted. Use load() instead.".to_string(),
+            ));
+        }
+
+        validate_section_sizes(&header, file_len)?;
+
+        // Read nonce (stored in manifest section)
+        let mut nonce_bytes = vec![0u8; header.manifest_size as usize];
+        file.read_exact(&mut nonce_bytes)?;
+
+        // Read ciphertext (stored in proof section)
+        let mut ciphertext = vec![0u8; header.proof_size as usize];
+        file.read_exact(&mut ciphertext)?;
+
+        // Read signature block
+        let mut signature_bytes = vec![0u8; header.signature_size as usize];
+        file.read_exact(&mut signature_bytes)?;
+
+        // Read and verify footer
+        let mut footer_bytes = [0u8; 8];
+        file.read_exact(&mut footer_bytes)?;
+        let footer = MkpeFooter::from_bytes(&footer_bytes)?;
+
+        // Verify CRC32
+        let calculated_crc = calculate_crc32(&[&header_bytes, &nonce_bytes, &ciphertext, &signature_bytes]);
+        if calculated_crc != footer.crc32 {
+            return Err(MkpeError::BundleError(
+                "CRC32 mismatch - file may be corrupted".to_string(),
+            ));
+        }
+
+        // Derive key and decrypt
+        let key_bytes = derive_key_from_password(password);
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|_| MkpeError::BundleError("Invalid key length".to_string()))?;
+
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext.as_ref())
+            .map_err(|_| MkpeError::BundleError("Decryption failed - invalid password or corrupted data".to_string()))?;
+
+        // Split plaintext at first JSON boundary
+        let boundary = find_json_boundary(&plaintext)
+            .ok_or_else(|| MkpeError::BundleError("Invalid encrypted payload: no JSON boundary found".to_string()))?;
+
+        let manifest_bytes = &plaintext[..boundary];
+        let proof_bytes = &plaintext[boundary..];
+
+        // Parse manifest
+        let manifest: Manifest = serde_json::from_slice(manifest_bytes)?;
+
+        // Parse proof section
+        let bundles = Self::deserialize_proof_section(proof_bytes, &manifest)?;
 
         // Verify signature
-        Self::verify_signature_block(&manifest_bytes, &proof_bytes, &signature_bytes, &manifest)?;
+        Self::verify_signature_block(manifest_bytes, proof_bytes, &signature_bytes, &manifest)?;
 
         Ok(MkpeArchive {
             manifest,
@@ -419,7 +630,7 @@ impl MkpeArchive {
             proofs,
             timestamp: chrono::Utc::now(),
             signature: manifest.signature.clone(),
-            system_fingerprint: crate::proof::SystemFingerprint::capture(),
+            system_fingerprint: crate::manifest::SystemFingerprint::capture(),
             parent_bundle_id: None,
         };
 
@@ -491,21 +702,26 @@ impl MkpeArchive {
             )));
         }
 
-        // Verify root hash matches bundles
-        let mut hasher = Sha256::new();
-        for bundle in &self.bundles {
-            // Monotonicity Check: Bundle timestamp cannot be older than proofs
-            for proof in &bundle.proofs {
-                if proof.timestamp > bundle.timestamp {
-                    return Err(MkpeError::VerificationFailed(format!(
-                        "Invariant Violation: Time Travel Detected. Proof {} ({}) is newer than its container bundle ({})",
-                        proof.id, proof.timestamp, bundle.timestamp
-                    )));
-                }
-                hasher.update(proof.content_hash.as_bytes());
-            }
-        }
-        let calculated_root = hex::encode(hasher.finalize());
+
+        // Verify root hash using proper Merkle tree (matches create_proof_bundle)
+        let all_leaf_hashes: Vec<String> = self
+            .bundles
+            .iter()
+            .flat_map(|b| {
+                b.proofs.iter().map(move |proof| {
+                    if proof.timestamp > b.timestamp {
+                        Err(MkpeError::VerificationFailed(format!(
+                            "Invariant Violation: Time Travel Detected. Proof {} ({}) is newer than its container bundle ({})",
+                            proof.id, proof.timestamp, b.timestamp
+                        )))
+                    } else {
+                        Ok(proof.content_hash.clone())
+                    }
+                })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let calculated_root = crate::proof::build_merkle_root(&all_leaf_hashes);
+
 
         if calculated_root != self.manifest.bundle_root_hash {
             return Err(MkpeError::VerificationFailed("Root hash mismatch".into()));
@@ -875,6 +1091,66 @@ fn resolve_proof_path(artifact_path: &Path, proof: &ProofItem) -> PathBuf {
     artifact_path.join(&proof.path)
 }
 
+
+/// Derive a 32-byte key from password using iterated SHA-256 (PBKDF2-like)
+fn derive_key_from_password(password: &str) -> [u8; KEY_SIZE] {
+    let mut key = [0u8; KEY_SIZE];
+    let mut current = password.as_bytes().to_vec();
+    for _ in 0..PBKDF2_ITERATIONS {
+        let mut hasher = Sha256::new();
+        hasher.update(&current);
+        current = hasher.finalize().to_vec();
+    }
+    key.copy_from_slice(&current[..KEY_SIZE]);
+    key
+}
+
+/// Find the end of the first JSON object by tracking braces and strings
+fn find_json_boundary(data: &[u8]) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut started = false;
+
+    for (i, &byte) in data.iter().enumerate() {
+        if !started {
+            if byte == b'{' {
+                started = true;
+                depth = 1;
+                continue;
+            }
+            continue;
+        }
+
+        if escape {
+            escape = false;
+            continue;
+        }
+
+        if in_string {
+            match byte {
+                b'\\' => escape = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
 #[cfg(test)]
 mod tests {
     use super::*;

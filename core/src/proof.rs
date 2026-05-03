@@ -2,6 +2,7 @@
 //!
 //! Core MKPE proof system for creating verifiable chains of custody
 
+use crate::manifest::SystemFingerprint;
 use crate::Result;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -44,32 +45,170 @@ pub struct ProofBundle {
     pub parent_bundle_id: Option<String>,
 }
 
-/// System fingerprint for provenance tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SystemFingerprint {
-    /// Username
-    pub user: String,
-    /// Platform (Windows, Linux, macOS)
-    pub platform: String,
-    /// Hostname
-    pub hostname: String,
-    /// Process ID
-    pub process_id: u32,
-    /// MKPE version
-    pub mkpe_version: String,
+/// Build a Merkle root from a list of hex-encoded SHA-256 hashes.
+///
+/// Constructs a pairwise binary Merkle tree:
+/// - Decodes each hex string into a `[u8; 32]`.
+/// - Builds internal nodes as `SHA-256(left || right)`.
+/// - Pads odd levels by duplicating the last element.
+/// - Returns the hex-encoded root hash.
+pub fn build_merkle_root(hashes: &[String]) -> String {
+    if hashes.is_empty() {
+        let hasher = Sha256::new();
+        return hex::encode(hasher.finalize());
+    }
+
+    let mut current: Vec<[u8; 32]> = hashes
+        .iter()
+        .map(|h| {
+            let bytes = hex::decode(h).expect("valid hex hash");
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        })
+        .collect();
+
+    while current.len() > 1 {
+        if current.len() % 2 == 1 {
+            current.push(*current.last().unwrap());
+        }
+
+        let mut next = Vec::with_capacity(current.len() / 2);
+        for chunk in current.chunks(2) {
+            let mut hasher = Sha256::new();
+            hasher.update(&chunk[0]);
+            hasher.update(&chunk[1]);
+            let hash: [u8; 32] = hasher.finalize().into();
+            next.push(hash);
+        }
+        current = next;
+    }
+
+    hex::encode(current[0])
 }
 
-impl SystemFingerprint {
-    /// Create a fingerprint of the current system
-    pub fn capture() -> Self {
-        Self {
-            user: whoami::username(),
-            platform: whoami::platform().to_string(),
-            hostname: whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string()),
-            process_id: std::process::id(),
-            mkpe_version: crate::MKPE_VERSION.to_string(),
-        }
+/// A Merkle inclusion proof verifying a leaf belongs to a tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerkleInclusionProof {
+    /// Hex-encoded hash of the leaf being proved
+    pub leaf_hash: String,
+    /// Zero-based index of the leaf in the original list
+    pub leaf_index: usize,
+    /// Total number of leaves in the tree
+    pub total_leaves: usize,
+    /// Hex-encoded Merkle root this proof targets
+    pub root_hash: String,
+    /// Path from leaf to root: (sibling_hash, is_right_sibling).
+    /// `is_right_sibling` is `true` when the sibling is to the right of the current node.
+    pub path: Vec<(String, bool)>,
+}
+
+/// Generate an inclusion proof for a leaf at the given index.
+///
+/// Returns `None` if `leaf_index` is out of bounds or `hashes` is empty.
+pub fn generate_inclusion_proof(
+    hashes: &[String],
+    leaf_index: usize,
+) -> Option<MerkleInclusionProof> {
+    if hashes.is_empty() || leaf_index >= hashes.len() {
+        return None;
     }
+
+    let total_leaves = hashes.len();
+    let leaf_hash = hashes[leaf_index].clone();
+
+    let mut current: Vec<[u8; 32]> = hashes
+        .iter()
+        .map(|h| {
+            let bytes = hex::decode(h).expect("valid hex hash");
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        })
+        .collect();
+
+    let mut path = Vec::new();
+    let mut idx = leaf_index;
+
+    while current.len() > 1 {
+        let len = current.len();
+
+        let (sibling_idx, is_right) = if idx % 2 == 0 {
+            // Current node is a left child; sibling is on the right.
+            if idx + 1 < len {
+                (idx + 1, true)
+            } else {
+                // Last element in an odd level — sibling is itself (padding).
+                (idx, false)
+            }
+        } else {
+            // Current node is a right child; sibling is on the left.
+            (idx - 1, false)
+        };
+
+        path.push((hex::encode(current[sibling_idx]), is_right));
+
+        // Pad odd level by duplicating the last element.
+        if len % 2 == 1 {
+            current.push(*current.last().unwrap());
+        }
+
+        let mut next = Vec::with_capacity(current.len() / 2);
+        for chunk in current.chunks(2) {
+            let mut hasher = Sha256::new();
+            hasher.update(&chunk[0]);
+            hasher.update(&chunk[1]);
+            let hash: [u8; 32] = hasher.finalize().into();
+            next.push(hash);
+        }
+        current = next;
+        idx /= 2;
+    }
+
+    let root_hash = hex::encode(current[0]);
+
+    Some(MerkleInclusionProof {
+        leaf_hash,
+        leaf_index,
+        total_leaves,
+        root_hash,
+        path,
+    })
+}
+
+/// Verify an inclusion proof against an expected Merkle root.
+///
+/// Reconstructs the root by hashing the leaf with each sibling in the path,
+/// then compares the result to `expected_root`.
+pub fn verify_inclusion_proof(proof: &MerkleInclusionProof, expected_root: &str) -> bool {
+    if proof.root_hash != expected_root {
+        return false;
+    }
+
+    let bytes = hex::decode(&proof.leaf_hash).expect("valid hex");
+    let mut current = {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        arr
+    };
+
+    for (sibling_hex, is_right) in &proof.path {
+        let sib_bytes = hex::decode(sibling_hex).expect("valid hex");
+        let mut sibling = [0u8; 32];
+        sibling.copy_from_slice(&sib_bytes);
+
+        let mut hasher = Sha256::new();
+        if *is_right {
+            hasher.update(&current);
+            hasher.update(&sibling);
+        } else {
+            hasher.update(&sibling);
+            hasher.update(&current);
+        }
+        current = hasher.finalize().into();
+    }
+
+    hex::encode(current) == expected_root
 }
 
 /// Create a proof item from a file
@@ -110,18 +249,28 @@ pub fn create_proof_bundle(
 ) -> Result<ProofBundle> {
     let bundle_id = uuid::Uuid::new_v4().to_string();
 
-    // Calculate Merkle root from all proof hashes
-    let mut hasher = Sha256::new();
-    for proof in &proofs {
-        hasher.update(proof.content_hash.as_bytes());
-    }
-    let root_hash = hex::encode(hasher.finalize());
+    // Build Merkle root from proof content hashes
+    let hashes: Vec<String> = proofs.iter().map(|p| p.content_hash.clone()).collect();
+    let root_hash = build_merkle_root(&hashes);
 
     let timestamp = chrono::Utc::now();
-    let system_fingerprint = SystemFingerprint::capture();
+    let system_fingerprint = crate::manifest::SystemFingerprint::capture();
 
-    // Sign the bundle
-    let bundle_data = format!("{}:{}:{}", bundle_id, root_hash, timestamp);
+    // Sign the bundle: bundle_id, root_hash, timestamp, proof_count,
+    // system_fingerprint fields, parent_bundle_id (same pattern as Manifest)
+    let bundle_data = format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        bundle_id,
+        root_hash,
+        timestamp,
+        proofs.len(),
+        system_fingerprint.user,
+        system_fingerprint.platform,
+        system_fingerprint.hostname,
+        system_fingerprint.process_id,
+        system_fingerprint.mkpe_version,
+        parent_bundle_id.as_deref().unwrap_or(""),
+    );
     let signature = keypair.sign(bundle_data.as_bytes())?;
 
     Ok(ProofBundle {
@@ -156,11 +305,8 @@ pub fn verify_proof_item(proof: &ProofItem, file_path: &Path, public_key: &str) 
 /// Verify a proof bundle's integrity
 pub fn verify_proof_bundle(bundle: &ProofBundle, public_key: &str) -> Result<bool> {
     // Recalculate Merkle root
-    let mut hasher = Sha256::new();
-    for proof in &bundle.proofs {
-        hasher.update(proof.content_hash.as_bytes());
-    }
-    let calculated_root = hex::encode(hasher.finalize());
+    let hashes: Vec<String> = bundle.proofs.iter().map(|p| p.content_hash.clone()).collect();
+    let calculated_root = build_merkle_root(&hashes);
 
     // Check if root hash matches
     if calculated_root != bundle.root_hash {
@@ -169,8 +315,17 @@ pub fn verify_proof_bundle(bundle: &ProofBundle, public_key: &str) -> Result<boo
 
     // Verify bundle signature
     let bundle_data = format!(
-        "{}:{}:{}",
-        bundle.bundle_id, bundle.root_hash, bundle.timestamp
+        "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+        bundle.bundle_id,
+        bundle.root_hash,
+        bundle.timestamp,
+        bundle.proofs.len(),
+        bundle.system_fingerprint.user,
+        bundle.system_fingerprint.platform,
+        bundle.system_fingerprint.hostname,
+        bundle.system_fingerprint.process_id,
+        bundle.system_fingerprint.mkpe_version,
+        bundle.parent_bundle_id.as_deref().unwrap_or(""),
     );
     crate::crypto::verify_signature(public_key, bundle_data.as_bytes(), &bundle.signature)
 }

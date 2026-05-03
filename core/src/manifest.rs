@@ -90,34 +90,44 @@ impl Manifest {
 
     /// Sign this manifest with a keypair
     pub fn sign(&mut self, keypair: &crate::crypto::KeyPair) -> Result<()> {
-        // Serialize manifest without signature field
-        let manifest_data = format!(
-            "{}:{}:{}:{}:{}",
-            self.manifest_id,
-            self.bundle_root_hash,
-            self.sealed_timestamp,
-            self.proof_count,
-            self.engine_version
-        );
-
-        self.signature = keypair.sign(manifest_data.as_bytes())?;
+        let manifest_data = serde_json::json!({
+            "schema_version": self.schema_version,
+            "engine_version": self.engine_version,
+            "manifest_id": self.manifest_id,
+            "system_fingerprint": self.system_fingerprint,
+            "bundle_root_hash": self.bundle_root_hash,
+            "proof_count": self.proof_count,
+            "sealed_timestamp": self.sealed_timestamp,
+            "verifier_public_key": self.verifier_public_key,
+            "parent_manifest_id": self.parent_manifest_id,
+            "metadata": self.metadata,
+        });
+        let canonical = serde_json::to_string(&manifest_data)
+            .map_err(|e| crate::MkpeError::BundleError(format!("Manifest serialization failed: {}", e)))?;
+        self.signature = keypair.sign(canonical.as_bytes())?;
         Ok(())
     }
 
     /// Verify this manifest's signature
     pub fn verify(&self) -> Result<bool> {
-        let manifest_data = format!(
-            "{}:{}:{}:{}:{}",
-            self.manifest_id,
-            self.bundle_root_hash,
-            self.sealed_timestamp,
-            self.proof_count,
-            self.engine_version
-        );
-
+        // Same canonical JSON as sign()
+        let manifest_data = serde_json::json!({
+            "schema_version": self.schema_version,
+            "engine_version": self.engine_version,
+            "manifest_id": self.manifest_id,
+            "system_fingerprint": self.system_fingerprint,
+            "bundle_root_hash": self.bundle_root_hash,
+            "proof_count": self.proof_count,
+            "sealed_timestamp": self.sealed_timestamp,
+            "verifier_public_key": self.verifier_public_key,
+            "parent_manifest_id": self.parent_manifest_id,
+            "metadata": self.metadata,
+        });
+        let canonical = serde_json::to_string(&manifest_data)
+            .map_err(|e| crate::MkpeError::BundleError(format!("Manifest serialization failed: {}", e)))?;
         crate::crypto::verify_signature(
             &self.verifier_public_key,
-            manifest_data.as_bytes(),
+            canonical.as_bytes(),
             &self.signature,
         )
     }

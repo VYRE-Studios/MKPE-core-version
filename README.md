@@ -145,7 +145,7 @@ Layer 4: Embedded DNA Tags
 - `ui_desktop/` - Desktop protection dashboard.
 - `ui_tray/` - System tray status app.
 - `docs/` - Format, architecture, and integration documentation.
-- `attestation/` - Planned build attestation layer.
+- `attestation/` - Build attestation layer ✅ (implemented in `core/src/attestation.rs`)
 - `stego/` - Planned embedded proof/steganography layer.
 
 ## Security Model
