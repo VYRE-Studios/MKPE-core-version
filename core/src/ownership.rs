@@ -316,7 +316,7 @@ fn canonical_revocation_payload(
 }
 
 /// A verified chain of ownership from genesis to the present.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OwnershipChain {
     /// The asset this chain describes.
     pub asset_id: String,

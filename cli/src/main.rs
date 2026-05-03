@@ -79,13 +79,17 @@ enum Commands {
         /// Output .mkpe file
         #[arg(short, long)]
         output: PathBuf,
+
+        /// Optional ownership chain JSON file to embed
+        #[arg(long)]
+        ownership: Option<PathBuf>,
     },
 
     /// Inspect a .mkpe file
     Inspect {
         /// Path to .mkpe file
         path: PathBuf,
-
+        /// Export manifest to JSON
         /// Export manifest to JSON
         #[arg(short, long)]
         export_manifest: Option<PathBuf>,
@@ -480,7 +484,9 @@ fn main() -> Result<()> {
         Commands::Keygen { output } => keygen_command(output, cli.verbose),
         Commands::Sign { path, key, output } => sign_command(path, key, output, cli.verbose),
         Commands::Verify { path, detailed } => verify_command(path, detailed, cli.verbose),
-        Commands::Bundle { path, key, output } => bundle_command(path, key, output, cli.verbose),
+        Commands::Bundle { path, key, output, ownership } => {
+            bundle_command(path, key, output, cli.verbose, ownership)
+        }
         Commands::Inspect {
             path,
             export_manifest,
@@ -632,6 +638,15 @@ fn verify_command(path: PathBuf, detailed: bool, verbose: bool) -> Result<()> {
                     "Created:".bold(),
                     stats.created_at.format("%Y-%m-%d %H:%M:%S UTC")
                 );
+                if stats.has_ownership {
+                    println!("  {} {}", "Ownership:".bold(), "embedded".green());
+                    println!("  {} {}", "Transfers:".bold(), stats.transfer_count);
+                    if let Some(ref chain) = archive.ownership {
+                        if let Some(owner) = chain.current_owner() {
+                            println!("  {} {}", "Current owner:".bold(), owner);
+                        }
+                    }
+                }
 
                 println!("\n{}", "System Fingerprint:".bold());
                 let fingerprint = &archive.manifest.system_fingerprint;
@@ -651,8 +666,46 @@ fn verify_command(path: PathBuf, detailed: bool, verbose: bool) -> Result<()> {
     Ok(())
 }
 
-fn bundle_command(path: PathBuf, key_path: PathBuf, output: PathBuf, verbose: bool) -> Result<()> {
-    sign_command(path, key_path, Some(output), verbose)
+fn bundle_command(
+    path: PathBuf,
+    key_path: PathBuf,
+    output: PathBuf,
+    _verbose: bool,
+    ownership: Option<PathBuf>,
+) -> Result<()> {
+    println!("{} {}", "🗂️  Bundling:".bold().cyan(), path.display());
+
+    let keypair = load_keypair(&key_path)?;
+
+    let ownership_chain = if let Some(ref opath) = ownership {
+        let json = std::fs::read_to_string(opath)
+            .with_context(|| format!("Failed to read ownership chain: {}", opath.display()))?;
+        let chain: morse_kirby_core::OwnershipChain = serde_json::from_str(&json)
+            .with_context(|| "Invalid ownership chain JSON")?;
+        Some(chain)
+    } else {
+        None
+    };
+
+    let archive = morse_kirby_core::create_mkpe_bundle_with_ownership(
+        &path, &keypair, &output, ownership_chain
+    )
+    .context("Failed to create MKPE bundle")?;
+
+    let stats = archive.stats();
+
+    println!("{}", "✓ Bundle created successfully!".green().bold());
+    println!("  {} {}", "Output:".bold(), output.display());
+    println!("  {} {}", "Bundles:".bold(), stats.bundle_count);
+    println!("  {} {}", "Total proofs:".bold(), stats.total_proof_items);
+    println!("  {} {}", "Root hash:".bold(), &stats.root_hash[..16]);
+    println!("  {} {}", "Manifest ID:".bold(), stats.manifest_id);
+    if stats.has_ownership {
+        println!("  {} {}", "Ownership:".bold(), "embedded".green());
+        println!("  {} {}", "Transfers:".bold(), stats.transfer_count);
+    }
+
+    Ok(())
 }
 
 fn inspect_command(path: PathBuf, export_manifest: Option<PathBuf>, _verbose: bool) -> Result<()> {
@@ -682,7 +735,6 @@ fn inspect_command(path: PathBuf, export_manifest: Option<PathBuf>, _verbose: bo
         "Created:".bold(),
         stats.created_at.format("%Y-%m-%d %H:%M:%S UTC")
     );
-
     println!("\n{}", "System Fingerprint:".bold());
     let fingerprint = &archive.manifest.system_fingerprint;
     println!("  {} {}", "User:".bold(), fingerprint.user);
@@ -694,6 +746,18 @@ fn inspect_command(path: PathBuf, export_manifest: Option<PathBuf>, _verbose: bo
         "Timestamp:".bold(),
         fingerprint.timestamp.format("%Y-%m-%d %H:%M:%S UTC")
     );
+
+    if stats.has_ownership {
+        println!("\n{}", "Ownership Chain:".bold());
+        println!("  {} {}", "Transfers:".bold(), stats.transfer_count);
+        if let Some(ref chain) = archive.ownership {
+            if let Some(owner) = chain.current_owner() {
+                println!("  {} {}", "Current owner:".bold(), owner);
+            }
+            println!("  {} {}", "Asset ID:".bold(), &chain.asset_id);
+            println!("  {} {}", "Genesis ID:".bold(), &chain.genesis_id);
+        }
+    }
 
     println!("\n{}", "Cryptographic Information:".bold());
     println!(

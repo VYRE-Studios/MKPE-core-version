@@ -42,7 +42,8 @@ pub mod format_dna;
 	};
 pub use audit::{AuditEvent, AuditEventType, AuditLog};
 pub use bundle::{
-    create_mkpe_bundle, default_sidecar_path, ArtifactVerificationReport, MkpeArchive,
+    create_mkpe_bundle, create_mkpe_bundle_with_ownership, default_sidecar_path,
+    ArtifactVerificationReport, MkpeArchive,
 };
 pub use stego::{embed_lsb, embed_provenance, extract_lsb, extract_provenance};
 pub use timestamp::request_timestamp;

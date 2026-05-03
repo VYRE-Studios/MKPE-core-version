@@ -662,5 +662,19 @@ impl Manifest {
 - [x] `OctetStreamAdapter` — backward-compatible raw byte-level LSB (reuses `dna.rs`)
 - [x] `PngAdapter` — LSB in RGB(A) pixel channels with PNG-specific seed derivation; survives PNG re-encoding
 - [x] `JsonAdapter` — hidden `_mkpe_dna` root key with base64-encoded DNA frame; survives pretty-print re-serialization
+
 - [x] CLI `--mime-type` flag on `mkpe dna embed` and `mkpe dna extract`
 - [x] 11 format-aware unit tests (roundtrip for all 3 formats, reencode survival, pretty-print survival, wrong secret, minimum size, missing key, unsupported MIME)
+
+### 6.7 MkpeArchive Ownership Integration
+
+- [x] `MkpeArchive` extended with optional `ownership: Option<OwnershipChain>`
+- [x] Backward-compatible binary format: ownership-free bundles use plain `Vec<ProofBundle>` JSON; bundles with ownership use `ProofSection` wrapper object
+- [x] `ProofSection` wrapper struct with `bundles` + optional `ownership` fields
+- [x] `create_mkpe_bundle_with_ownership(dir, keypair, output, ownership)` public API
+- [x] `ArchiveStats` exposes `has_ownership` and `transfer_count`
+- [x] `MkpeArchive::verify()` rejects bundles with revoked or non-executed ownership chains
+- [x] CLI `mkpe bundle --ownership <chain.json>` embeds ownership chain into `.mkpe`
+- [x] CLI `mkpe verify --detailed` and `mkpe inspect` display ownership chain info
+- [x] 3 core unit tests (roundtrip with valid chain, backward compat without ownership, revoked chain fails verify)
+- [x] 1 CLI integration test (bundle with ownership roundtrip)
