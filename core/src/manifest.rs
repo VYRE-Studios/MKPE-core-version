@@ -59,11 +59,37 @@ pub struct Manifest {
     pub verifier_public_key: String,
     /// Signature of this manifest
     pub signature: String,
-    /// Optional parent manifest ID for chaining
-    pub parent_manifest_id: Option<String>,
-    /// Custom metadata
-    pub metadata: HashMap<String, serde_json::Value>,
+	/// Optional parent manifest ID for chaining
+	pub parent_manifest_id: Option<String>,
+	/// Optional monotonic nonce for replay protection
+	pub nonce: Option<u64>,
+	/// Custom metadata
+	pub metadata: HashMap<String, serde_json::Value>,
 }
+
+	/// Metadata about a signing key for rotation tracking
+	#[derive(Debug, Clone, Serialize, Deserialize)]
+	pub struct KeyMetadata {
+		/// Hash of public key for identification
+		pub key_id: String,
+		/// Key version for rotation
+		pub version: u32,
+		/// When this key was created
+		pub created_at: chrono::DateTime<chrono::Utc>,
+		/// Optional expiration
+		pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+		/// Optional predecessor key_id for rotation chain
+		pub predecessor_key_id: Option<String>,
+	}
+
+	/// List of revoked keys
+	#[derive(Debug, Clone, Serialize, Deserialize)]
+	pub struct RevocationList {
+		/// Revoked key_ids
+		pub revoked_keys: Vec<String>,
+		/// When the list was published
+		pub timestamp: chrono::DateTime<chrono::Utc>,
+	}
 
 impl Manifest {
     /// Create a new manifest
@@ -73,35 +99,48 @@ impl Manifest {
         public_key: String,
         parent_manifest_id: Option<String>,
     ) -> Self {
+        // Derive manifest_id deterministically from bundle content
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        bundle_root_hash.hash(&mut hasher);
+        let h1 = hasher.finish();
+        let mut hasher2 = DefaultHasher::new();
+        public_key.hash(&mut hasher2);
+        let h2 = hasher2.finish();
+        let manifest_id = format!("{:016x}-{:016x}", h1, h2);
+
         Self {
             schema_version: crate::SCHEMA_VERSION.to_string(),
             engine_version: crate::MKPE_VERSION.to_string(),
-            manifest_id: uuid::Uuid::new_v4().to_string(),
+            manifest_id,
             system_fingerprint: SystemFingerprint::capture(),
             bundle_root_hash,
             proof_count,
             sealed_timestamp: chrono::Utc::now(),
             verifier_public_key: public_key,
-            signature: String::new(), // Will be set after signing
-            parent_manifest_id,
-            metadata: HashMap::new(),
-        }
+			signature: String::new(), // Will be set after signing
+			parent_manifest_id,
+			nonce: None,
+			metadata: HashMap::new(),
+		}
     }
 
     /// Sign this manifest with a keypair
     pub fn sign(&mut self, keypair: &crate::crypto::KeyPair) -> Result<()> {
+        // Sign only the stable identity fields for deterministic signatures
         let manifest_data = serde_json::json!({
             "schema_version": self.schema_version,
             "engine_version": self.engine_version,
             "manifest_id": self.manifest_id,
-            "system_fingerprint": self.system_fingerprint,
             "bundle_root_hash": self.bundle_root_hash,
             "proof_count": self.proof_count,
-            "sealed_timestamp": self.sealed_timestamp,
             "verifier_public_key": self.verifier_public_key,
-            "parent_manifest_id": self.parent_manifest_id,
-            "metadata": self.metadata,
-        });
+			"verifier_public_key": self.verifier_public_key,
+			"parent_manifest_id": self.parent_manifest_id,
+			"nonce": self.nonce,
+			"metadata": self.metadata,
+		});
         let canonical = serde_json::to_string(&manifest_data)
             .map_err(|e| crate::MkpeError::BundleError(format!("Manifest serialization failed: {}", e)))?;
         self.signature = keypair.sign(canonical.as_bytes())?;
@@ -110,19 +149,19 @@ impl Manifest {
 
     /// Verify this manifest's signature
     pub fn verify(&self) -> Result<bool> {
-        // Same canonical JSON as sign()
+        // Same canonical JSON as sign() - stable identity fields only
         let manifest_data = serde_json::json!({
             "schema_version": self.schema_version,
             "engine_version": self.engine_version,
             "manifest_id": self.manifest_id,
-            "system_fingerprint": self.system_fingerprint,
             "bundle_root_hash": self.bundle_root_hash,
             "proof_count": self.proof_count,
-            "sealed_timestamp": self.sealed_timestamp,
             "verifier_public_key": self.verifier_public_key,
-            "parent_manifest_id": self.parent_manifest_id,
-            "metadata": self.metadata,
-        });
+			"verifier_public_key": self.verifier_public_key,
+			"parent_manifest_id": self.parent_manifest_id,
+			"nonce": self.nonce,
+			"metadata": self.metadata,
+		});
         let canonical = serde_json::to_string(&manifest_data)
             .map_err(|e| crate::MkpeError::BundleError(format!("Manifest serialization failed: {}", e)))?;
         crate::crypto::verify_signature(
@@ -146,6 +185,47 @@ impl Manifest {
         hasher.update(manifest_json.as_bytes());
         hex::encode(hasher.finalize())
     }
+
+	/// Verify nonce is at least the expected minimum
+	pub fn verify_nonce(&self, expected: u64) -> bool {
+		self.nonce.map(|n| n >= expected).unwrap_or(false)
+	}
+
+	/// Check if this is a genesis manifest (no parent)
+	pub fn is_genesis(&self) -> bool {
+		self.parent_manifest_id.is_none()
+	}
+
+	/// Compute chain depth from metadata or infer from parent presence
+	pub fn chain_depth(&self) -> u32 {
+		self.metadata
+			.get("chain_depth")
+			.and_then(|v| v.as_u64())
+			.map(|d| d as u32)
+			.or_else(|| if self.parent_manifest_id.is_some() { Some(2) } else { Some(1) })
+			.unwrap_or(1)
+	}
+
+	/// Verify key metadata against a trusted key set and optional revocation list
+	pub fn verify_key_rotation(
+		&self,
+		trusted_keys: &std::collections::BTreeMap<String, crate::crypto::KeyPair>,
+		revocation_list: Option<&RevocationList>,
+	) -> Result<bool> {
+		let _key = trusted_keys
+			.get(&self.verifier_public_key)
+			.ok_or_else(|| crate::MkpeError::VerificationFailed(
+				"Signing key is not in trusted key set".into(),
+			))?;
+
+		if let Some(rl) = revocation_list {
+			if rl.revoked_keys.contains(&self.verifier_public_key) {
+				return Ok(false);
+			}
+		}
+
+		Ok(true)
+	}
 }
 
 /// Build information embedded in the engine

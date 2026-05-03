@@ -66,23 +66,46 @@ pub struct AttestationVerificationOptions {
     pub bundle_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BuildAttestation {
-    pub schema_version: String,
-    pub attestation_id: String,
-    pub subject_path: String,
-    pub subject_kind: AttestationSubjectKind,
-    pub subject_sha256: String,
-    pub bundle_manifest_id: Option<String>,
-    pub bundle_root_hash: Option<String>,
-    pub build_fingerprint: BuildFingerprint,
-    pub command: Option<String>,
-    pub timestamp_utc: chrono::DateTime<chrono::Utc>,
-    pub attested_by: String,
-    pub signer_public_key: String,
-    pub signature: String,
-}
+	#[derive(Debug, Clone, Serialize, Deserialize)]
+	#[serde(deny_unknown_fields)]
+	pub struct BuildAttestation {
+		pub schema_version: String,
+		pub attestation_id: String,
+		pub subject_path: String,
+		pub subject_kind: AttestationSubjectKind,
+		pub subject_sha256: String,
+		pub bundle_manifest_id: Option<String>,
+		pub bundle_root_hash: Option<String>,
+		pub build_fingerprint: BuildFingerprint,
+		pub build_info: Option<BuildInfo>,
+		pub command: Option<String>,
+		pub timestamp_utc: chrono::DateTime<chrono::Utc>,
+		pub attested_by: String,
+		pub signer_public_key: String,
+		pub signature: String,
+		pub nonce: Option<u64>,
+	}
+
+	/// Build provenance metadata for SLSA-like attestations
+	#[derive(Debug, Clone, Serialize, Deserialize)]
+	pub struct BuildInfo {
+		pub builder_id: String,
+		pub build_type: String,
+		pub build_definition: String,
+		pub source_repository: Option<String>,
+		pub source_commit: Option<String>,
+		pub dependencies: Vec<Dependency>,
+		pub environment: std::collections::HashMap<String, String>,
+	}
+
+	/// A single dependency with integrity hash
+	#[derive(Debug, Clone, Serialize, Deserialize)]
+	pub struct Dependency {
+		pub name: String,
+		pub version: String,
+		pub source: String,
+		pub integrity: String,
+	}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttestationVerificationReport {
@@ -94,21 +117,25 @@ pub struct AttestationVerificationReport {
     pub bundle_root_hash: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct AttestationSigningPayload<'a> {
-    schema_version: &'a str,
-    attestation_id: &'a str,
-    subject_path: &'a str,
-    subject_kind: &'a AttestationSubjectKind,
-    subject_sha256: &'a str,
-    bundle_manifest_id: &'a Option<String>,
-    bundle_root_hash: &'a Option<String>,
-    build_fingerprint: &'a BuildFingerprint,
-    command: &'a Option<String>,
-    timestamp_utc: &'a chrono::DateTime<chrono::Utc>,
-    attested_by: &'a str,
-    signer_public_key: &'a str,
-}
+	#[derive(Debug, Clone, Serialize)]
+	struct AttestationSigningPayload<'a> {
+		schema_version: &'a str,
+		attestation_id: &'a str,
+		subject_path: &'a str,
+		subject_kind: &'a AttestationSubjectKind,
+		subject_sha256: &'a str,
+		bundle_manifest_id: &'a Option<String>,
+		bundle_root_hash: &'a Option<String>,
+		build_fingerprint: &'a BuildFingerprint,
+		command: &'a Option<String>,
+		timestamp_utc: &'a chrono::DateTime<chrono::Utc>,
+		attested_by: &'a str,
+		signer_public_key: &'a str,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		nonce: &'a Option<u64>,
+		#[serde(skip_serializing_if = "Option::is_none")]
+		build_info: &'a Option<BuildInfo>,
+	}
 
 impl BuildAttestation {
     fn signing_payload(&self) -> AttestationSigningPayload<'_> {
@@ -124,13 +151,55 @@ impl BuildAttestation {
             command: &self.command,
             timestamp_utc: &self.timestamp_utc,
             attested_by: &self.attested_by,
-            signer_public_key: &self.signer_public_key,
-        }
+			signer_public_key: &self.signer_public_key,
+			nonce: &self.nonce,
+			build_info: &self.build_info,
+		}
     }
 
     fn canonical_payload(&self) -> Result<Vec<u8>> {
         Ok(serde_json::to_vec(&self.signing_payload())?)
     }
+
+	/// Verify nonce is at least the expected minimum
+	pub fn verify_nonce(&self, expected: u64) -> bool {
+		self.nonce.map(|n| n >= expected).unwrap_or(false)
+	}
+
+	/// Generate a SLSA Provenance v1.0 predicate from this attestation
+	pub fn to_slsa_predicate(&self) -> serde_json::Value {
+		let build_info = self.build_info.as_ref();
+		serde_json::json!({
+			"_type": "https://in-toto.io/Statement/v1",
+			"subject": [{
+				"name": self.subject_path,
+				"digest": {
+					"sha256": self.subject_sha256,
+				}
+			}],
+			"predicateType": "https://slsa.dev/provenance/v1",
+			"predicate": {
+				"buildDefinition": {
+					"buildType": build_info.map(|b| b.build_type.clone()).unwrap_or_default(),
+					"externalParameters": {},
+					"internalParameters": {},
+					"resolvedDependencies": build_info.map(|b| b.dependencies.iter().map(|d| serde_json::json!({
+						"uri": format!("{}@{}", d.source, d.version),
+						"digest": { "sha256": d.integrity }
+					})).collect::<Vec<_>>()).unwrap_or_default(),
+				},
+				"runDetails": {
+					"builder": {
+						"id": build_info.map(|b| b.builder_id.clone()).unwrap_or_else(|| self.attested_by.clone()),
+					},
+					"metadata": {
+						"invocationId": self.attestation_id,
+						"startedOn": self.timestamp_utc.to_rfc3339(),
+					}
+				}
+			}
+		})
+	}
 }
 
 pub fn create_build_attestation(
@@ -160,13 +229,20 @@ pub fn create_build_attestation(
         subject_sha256,
         bundle_manifest_id,
         bundle_root_hash,
-        build_fingerprint: BuildFingerprint::capture(),
-        command: options.command,
-        timestamp_utc: chrono::Utc::now(),
-        attested_by: options.attested_by,
-        signer_public_key: keypair.public_key.clone(),
-        signature: String::new(),
-    };
+		build_fingerprint: BuildFingerprint::capture(),
+		build_info: None,
+		command: options.command,
+		timestamp_utc: chrono::Utc::now(),
+		attested_by: options.attested_by,
+		signer_public_key: keypair.public_key.clone(),
+		signature: String::new(),
+		nonce: Some(
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos() as u64)
+				.unwrap_or(0),
+		),
+	};
 
     attestation.signature = keypair.sign(&attestation.canonical_payload()?)?;
     Ok(attestation)

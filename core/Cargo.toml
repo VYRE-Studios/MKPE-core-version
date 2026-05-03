@@ -1,6 +1,6 @@
 [package]
 name = "morse_kirby_core"
-version = "1.1.0-mkpe"
+version = "1.2.0-mkpe"
 edition = "2021"
 authors = ["Morse-Kirby Provenance Engine"]
 description = "Canonical Morse-Kirby Provenance Engine - Cryptographic verification core"
@@ -29,15 +29,15 @@ base64 = "0.21"
 hex = "0.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 
+# Encryption/Compression
 aes-gcm = "0.10"
 zstd = "0.13"
 png = "0.17"
 ureq = "2"
+
 # System info
 whoami = "1.4"
 
 [dev-dependencies]
 tempfile = "3"
-
-
-
+proptest = "1"
