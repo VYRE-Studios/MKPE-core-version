@@ -306,8 +306,12 @@ enum DnaCommands {
         /// Output tagged artifact path (defaults to overwriting input)
         #[arg(short, long)]
         output: Option<PathBuf>,
-    },
 
+        /// MIME type of the artifact (enables format-aware embedding).
+        /// If omitted, the type is guessed from the file extension.
+        #[arg(short = 'm', long)]
+        mime_type: Option<String>,
+    },
     /// Extract and verify a DNA tag from a binary artifact
     Extract {
         /// Tagged artifact file
@@ -320,8 +324,12 @@ enum DnaCommands {
         /// Optional attestation JSON to compare against extracted DNA
         #[arg(short, long)]
         attestation: Option<PathBuf>,
-    },
 
+        /// MIME type of the artifact (enables format-aware extraction).
+        /// If omitted, the type is guessed from the file extension.
+        #[arg(short = 'm', long)]
+        mime_type: Option<String>,
+    },
     /// Inspect a .mkpe DNA proof bundle
     Inspect {
         /// .mkpe sidecar proof bundle
@@ -903,23 +911,27 @@ fn dna_command(command: DnaCommands, verbose: bool, format: OutputFormat) -> Res
         DnaCommands::Inspect { bundle } => {
             inspect_command(bundle, None, verbose)?;
         }
-        DnaCommands::Embed { artifact, attestation, key, output } => {
-            dna_embed_command(&artifact, &attestation, &key, output.as_ref(), format)?;
+        DnaCommands::Embed { artifact, attestation, key, output, mime_type } => {
+            dna_embed_command(&artifact, &attestation, &key, output.as_ref(), format, mime_type.as_deref())?;
         }
-        DnaCommands::Extract { artifact, key, attestation } => {
-            dna_extract_command(&artifact, &key, attestation.as_ref(), format)?;
+        DnaCommands::Extract { artifact, key, attestation, mime_type } => {
+            dna_extract_command(&artifact, &key, attestation.as_ref(), format, mime_type.as_deref())?;
         }
     }
 
     Ok(())
 }
 /// Embed a DNA provenance tag into a binary artifact.
+///
+/// When `mime_type` is `Some`, uses format-aware embedding (PNG, JSON, etc.).
+/// When `None`, falls back to raw byte-level LSB.
 fn dna_embed_command(
     artifact: &PathBuf,
     attestation_path: &PathBuf,
     key_path: &PathBuf,
     output: Option<&PathBuf>,
     format: OutputFormat,
+    mime_type: Option<&str>,
 ) -> Result<()> {
     let attestation_bytes = std::fs::read(attestation_path)
         .with_context(|| format!("Failed to read attestation: {}", attestation_path.display()))?;
@@ -928,7 +940,6 @@ fn dna_embed_command(
         hasher.update(&attestation_bytes);
         hasher.finalize().into()
     };
-    let tag = morse_kirby_core::DnaTag::from_payload(payload);
 
     let keypair = load_keypair(key_path)?;
     let key_bytes = base64::engine::general_purpose::STANDARD
@@ -941,15 +952,23 @@ fn dna_embed_command(
         key_bytes.as_slice().try_into().unwrap()
     );
 
-    let mut file_bytes = std::fs::read(artifact)
+    let file_bytes = std::fs::read(artifact)
         .with_context(|| format!("Failed to read artifact: {}", artifact.display()))?;
 
-    let modified = morse_kirby_core::embed_dna(&mut file_bytes, &tag, &secret,
-    )
-    .with_context(|| "DNA embedding failed")?;
+    let embedded = if let Some(mt) = mime_type {
+        morse_kirby_core::embed_format_aware_with_payload(
+            &file_bytes, mt, &secret, &payload
+        ).with_context(|| "Format-aware DNA embedding failed")?
+    } else {
+        let mut buf = file_bytes;
+        morse_kirby_core::embed_dna(
+            &mut buf, &morse_kirby_core::DnaTag::from_payload(payload), &secret
+        ).with_context(|| "DNA embedding failed")?;
+        buf
+    };
 
     let out_path = output.unwrap_or(artifact);
-    std::fs::write(out_path, &file_bytes)
+    std::fs::write(out_path, &embedded)
         .with_context(|| format!("Failed to write tagged artifact: {}", out_path.display()))?;
 
     if format == OutputFormat::Json {
@@ -961,7 +980,7 @@ fn dna_embed_command(
                 "output": out_path,
                 "attestation": attestation_path,
                 "dna_payload": hex::encode(&payload),
-                "modified_bytes": modified,
+                "mime_type": mime_type,
             })
         );
     } else {
@@ -970,17 +989,22 @@ fn dna_embed_command(
         println!("  {} {}", "Output:".bold(), out_path.display());
         println!("  {} {}", "Attestation:".bold(), attestation_path.display());
         println!("  {} {}", "DNA payload:".bold(), hex::encode(&payload));
-        println!("  {} {}", "Modified bytes:".bold(), modified);
+        if let Some(mt) = mime_type {
+            println!("  {} {}", "MIME type:".bold(), mt);
+        }
     }
     Ok(())
 }
-
 /// Extract and optionally verify a DNA tag from a binary artifact.
+///
+/// When `mime_type` is `Some`, uses format-aware extraction (PNG, JSON, etc.).
+/// When `None`, falls back to raw byte-level LSB.
 fn dna_extract_command(
     artifact: &PathBuf,
     key_path: &PathBuf,
     attestation_path: Option<&PathBuf>,
     format: OutputFormat,
+    mime_type: Option<&str>,
 ) -> Result<()> {
     let keypair = load_keypair(key_path)?;
     let key_bytes = base64::engine::general_purpose::STANDARD
@@ -996,9 +1020,13 @@ fn dna_extract_command(
     let file_bytes = std::fs::read(artifact)
         .with_context(|| format!("Failed to read artifact: {}", artifact.display()))?;
 
-    let tag = morse_kirby_core::extract_dna(&file_bytes, &secret,
-    )
-    .with_context(|| "DNA extraction failed — tag may be missing or corrupted")?;
+    let tag = if let Some(mt) = mime_type {
+        morse_kirby_core::extract_format_aware(&file_bytes, mt, &secret
+        ).with_context(|| "Format-aware DNA extraction failed")?
+    } else {
+        morse_kirby_core::extract_dna(&file_bytes, &secret
+        ).with_context(|| "DNA extraction failed — tag may be missing or corrupted")?
+    };
 
     let mut verified = false;
     if let Some(path) = attestation_path {
@@ -1028,6 +1056,7 @@ fn dna_extract_command(
                 "artifact": artifact,
                 "dna_payload": hex::encode(&tag.payload),
                 "verified": verified,
+                "mime_type": mime_type,
             })
         );
     } else {
@@ -1038,10 +1067,12 @@ fn dna_extract_command(
         }
         println!("  {} {}", "Artifact:".bold(), artifact.display());
         println!("  {} {}", "DNA payload:".bold(), hex::encode(&tag.payload));
+        if let Some(mt) = mime_type {
+            println!("  {} {}", "MIME type:".bold(), mt);
+        }
     }
     Ok(())
 }
-
 fn attest_command(command: AttestCommands, format: OutputFormat) -> Result<()> {
     match command {
         AttestCommands::Generate {

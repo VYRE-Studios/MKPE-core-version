@@ -34,6 +34,7 @@ pub mod stego;
 pub mod timestamp;
 
 pub mod dna;
+pub mod format_dna;
 	pub use attestation::{
 	    create_build_attestation, hash_subject, verify_build_attestation, AttestationOptions,
 	    AttestationSubjectKind, AttestationVerificationOptions, AttestationVerificationReport,
@@ -45,7 +46,10 @@ pub use bundle::{
 };
 pub use stego::{embed_lsb, embed_provenance, extract_lsb, extract_provenance};
 pub use timestamp::request_timestamp;
-pub use dna::{DnaTag, embed_dna, extract_dna, derive_dna_secret, crc64};
+pub use dna::{DnaTag, embed_dna, extract_dna, derive_dna_secret, crc64, embed_dna_raw, extract_dna_raw};
+pub use format_dna::{
+    embed_format_aware, embed_format_aware_with_payload, extract_format_aware,
+};
 pub use ownership::{
     OwnershipChain, RevocationEntry, SignatureEntry, TransferManifest,
     TransferStatus, TransferTerms,

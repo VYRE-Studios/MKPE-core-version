@@ -649,7 +649,18 @@ impl Manifest {
 
 ### 6.5 Tests
 
-- [x] Core unit tests: 13 ownership tests covering creation, signing, chain append, broken links, wrong asset, non-execution, revocation, resale limits
+- [x] Core unit tests: 13 ownership + 11 format-aware tests covering creation, signing, chain append, broken links, wrong asset, non-execution, revocation, resale limits, octet-stream, PNG, JSON adapters
 - [x] CLI integration tests: 4 tests covering create-and-sign, verify-chain, revocation, marketplace escrow
-- [x] All 244 core tests pass
+- [x] All 255 core tests pass
 - [x] All 13 CLI tests pass
+
+### 6.6 Format-Aware DNA Embedding
+
+- [x] `embed_format_aware(bytes, mime_type, secret)` — public API dispatching by MIME type
+- [x] `embed_format_aware_with_payload(bytes, mime_type, secret, payload)` — content-specific tagging
+- [x] `extract_format_aware(bytes, mime_type, secret)` — symmetric extraction
+- [x] `OctetStreamAdapter` — backward-compatible raw byte-level LSB (reuses `dna.rs`)
+- [x] `PngAdapter` — LSB in RGB(A) pixel channels with PNG-specific seed derivation; survives PNG re-encoding
+- [x] `JsonAdapter` — hidden `_mkpe_dna` root key with base64-encoded DNA frame; survives pretty-print re-serialization
+- [x] CLI `--mime-type` flag on `mkpe dna embed` and `mkpe dna extract`
+- [x] 11 format-aware unit tests (roundtrip for all 3 formats, reencode survival, pretty-print survival, wrong secret, minimum size, missing key, unsupported MIME)

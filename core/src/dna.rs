@@ -105,12 +105,12 @@ pub fn crc64(data: &[u8]) -> u64 {
 
 /// A simple, deterministic PRNG (xoshiro256++) used to expand a 32-byte seed
 /// into a stream of pseudorandom 64-bit values.
-struct Prng {
+pub struct Prng {
     s: [u64; 4],
 }
 
 impl Prng {
-    fn from_seed(seed: [u8; 32]) -> Self {
+    pub fn from_seed(seed: [u8; 32]) -> Self {
         let mut s = [0u64; 4];
         for (i, chunk) in seed.chunks_exact(8).enumerate() {
             s[i] = u64::from_le_bytes(chunk.try_into().unwrap());
@@ -123,7 +123,7 @@ impl Prng {
     }
 
     #[inline]
-    fn next(&mut self) -> u64 {
+    pub fn next(&mut self) -> u64 {
         let result = self.s[0]
             .wrapping_add(self.s[3])
             .rotate_left(23)
@@ -140,7 +140,7 @@ impl Prng {
 
     /// Generate `n` distinct-ish positions in `[reserved, len)` together with
     /// a bit offset in `0..8`.
-    fn positions(&mut self, len: usize, reserved: usize, n: usize) -> Vec<(usize, u8)> {
+    pub fn positions(&mut self, len: usize, reserved: usize, n: usize) -> Vec<(usize, u8)> {
         let mut out = Vec::with_capacity(n);
         let usable = len.saturating_sub(reserved);
         let total_slots = usable * 8;
@@ -165,7 +165,7 @@ impl Prng {
 /// The fingerprint uses **only** bytes that the embedder promises never to
 /// modify (`file_len` and the first `RESERVED_HEADER_BYTES`).  This keeps
 /// the seed stable before and after embedding.
-fn derive_seed(secret: &[u8; 32], file_len: usize, header: &[u8]) -> [u8; 32] {
+pub fn derive_file_seed(secret: &[u8; 32], file_len: usize, header: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"mkpe.dna.v1");
     hasher.update(secret);
@@ -284,17 +284,12 @@ impl DnaTag {
     }
 }
 
-/// Embed a DNA tag into a binary artifact.
-///
-/// # Requirements
-///
-/// - `file_bytes.len() >= MIN_FILE_BYTES` (currently 1024).
-/// - The first `RESERVED_HEADER_BYTES` are preserved.
+/// Embed a DNA tag into a binary artifact using an already-derived seed.
 ///
 /// # Returns
 ///
 /// The number of distinct byte positions that were modified.
-pub fn embed_dna(file_bytes: &mut [u8], tag: &DnaTag, secret: &[u8; 32]) -> Result<usize> {
+pub fn embed_dna_raw(file_bytes: &mut [u8], tag: &DnaTag, seed: &[u8; 32]) -> Result<usize> {
     if file_bytes.len() < MIN_FILE_BYTES {
         return Err(MkpeError::InvalidProof(format!(
             "File too small for DNA tagging: {} bytes (minimum {})",
@@ -303,8 +298,7 @@ pub fn embed_dna(file_bytes: &mut [u8], tag: &DnaTag, secret: &[u8; 32]) -> Resu
         )));
     }
 
-    let seed = derive_seed(secret, file_bytes.len(), file_bytes);
-    let mut prng = Prng::from_seed(seed);
+    let mut prng = Prng::from_seed(*seed);
     let positions = prng.positions(file_bytes.len(), RESERVED_HEADER_BYTES, TOTAL_BITS);
 
     let frame = tag.to_frame();
@@ -322,11 +316,23 @@ pub fn embed_dna(file_bytes: &mut [u8], tag: &DnaTag, secret: &[u8; 32]) -> Resu
     Ok(distinct.len())
 }
 
-/// Extract a DNA tag from a binary artifact.
+/// Embed a DNA tag into a binary artifact.
 ///
-/// Uses majority voting across the three redundant copies.  If the CRC
-/// check fails, the tag has been corrupted beyond the correction threshold.
-pub fn extract_dna(file_bytes: &[u8], secret: &[u8; 32]) -> Result<DnaTag> {
+/// # Requirements
+///
+/// - `file_bytes.len() >= MIN_FILE_BYTES` (currently 1024).
+/// - The first `RESERVED_HEADER_BYTES` are preserved.
+///
+/// # Returns
+///
+/// The number of distinct byte positions that were modified.
+pub fn embed_dna(file_bytes: &mut [u8], tag: &DnaTag, secret: &[u8; 32]) -> Result<usize> {
+    let seed = derive_file_seed(secret, file_bytes.len(), file_bytes);
+    embed_dna_raw(file_bytes, tag, &seed)
+}
+
+/// Extract a DNA tag from a binary artifact using an already-derived seed.
+pub fn extract_dna_raw(file_bytes: &[u8], seed: &[u8; 32]) -> Result<DnaTag> {
     if file_bytes.len() < MIN_FILE_BYTES {
         return Err(MkpeError::InvalidProof(format!(
             "File too small to contain DNA tag: {} bytes (minimum {})",
@@ -335,8 +341,7 @@ pub fn extract_dna(file_bytes: &[u8], secret: &[u8; 32]) -> Result<DnaTag> {
         )));
     }
 
-    let seed = derive_seed(secret, file_bytes.len(), file_bytes);
-    let mut prng = Prng::from_seed(seed);
+    let mut prng = Prng::from_seed(*seed);
     let positions = prng.positions(file_bytes.len(), RESERVED_HEADER_BYTES, TOTAL_BITS);
 
     let mut interleaved = [0u8; INTERLEAVED_BYTES];
@@ -351,6 +356,15 @@ pub fn extract_dna(file_bytes: &[u8], secret: &[u8; 32]) -> Result<DnaTag> {
 
     let frame = deinterleave(&interleaved);
     DnaTag::from_frame(&frame)
+}
+
+/// Extract a DNA tag from a binary artifact.
+///
+/// Uses majority voting across the three redundant copies.  If the CRC
+/// check fails, the tag has been corrupted beyond the correction threshold.
+pub fn extract_dna(file_bytes: &[u8], secret: &[u8; 32]) -> Result<DnaTag> {
+    let seed = derive_file_seed(secret, file_bytes.len(), file_bytes);
+    extract_dna_raw(file_bytes, &seed)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
