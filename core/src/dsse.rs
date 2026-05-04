@@ -5,7 +5,7 @@
 //! and serialized payload to prevent type confusion attacks.
 
 use crate::crypto;
-use crate::crypto::KeyPair;
+use crate::crypto::Signer;
 use crate::manifest::Manifest;
 use crate::{MkpeError, Result};
 use base64::{engine::general_purpose, Engine as _};
@@ -59,7 +59,7 @@ impl DSSEEnvelope {
     ///
     /// The manifest is serialized to canonical JSON, base64-encoded as the payload,
     /// and signed using DSSE PAE over `payload_type || serialized_body`.
-    pub fn from_manifest(manifest: &Manifest, keypair: &KeyPair) -> Result<Self> {
+    pub fn from_manifest(manifest: &Manifest, keypair: &dyn Signer) -> Result<Self> {
         let serialized_body =
             serde_json::to_vec(manifest).map_err(|e| MkpeError::JsonError(e))?;
         let payload = general_purpose::STANDARD.encode(&serialized_body);
@@ -68,7 +68,7 @@ impl DSSEEnvelope {
         let sig = keypair.sign(&pae_bytes)?;
 
         let signature = DSSSignature {
-            keyid: keypair.key_id.clone(),
+            keyid: keypair.key_id(),
             sig,
         };
 
@@ -142,7 +142,7 @@ mod tests {
         let manifest = Manifest::new(
             "test_root_hash".to_string(),
             3,
-            keypair.public_key.clone(),
+            keypair.public_key()?,
             None,
         );
 
@@ -151,9 +151,9 @@ mod tests {
         assert_eq!(envelope.payload_type, DSSE_PAYLOAD_TYPE);
         assert_eq!(envelope.signatures.len(), 1);
         assert!(!envelope.signatures[0].sig.is_empty());
-        assert_eq!(envelope.signatures[0].keyid, keypair.key_id);
+        assert_eq!(envelope.signatures[0].keyid, keypair.key_id());
 
-        let is_valid = envelope.verify(&keypair.public_key)?;
+        let is_valid = envelope.verify(&keypair.public_key()?)?;
         assert!(is_valid, "envelope must verify with the signing public key");
 
         Ok(())
@@ -166,12 +166,12 @@ mod tests {
         let manifest = Manifest::new(
             "test_root_hash".to_string(),
             3,
-            keypair.public_key.clone(),
+            keypair.public_key()?,
             None,
         );
 
         let envelope = DSSEEnvelope::from_manifest(&manifest, &keypair)?;
-        let is_valid = envelope.verify(&wrong_keypair.public_key)?;
+        let is_valid = envelope.verify(&wrong_keypair.public_key()?)?;
         assert!(!is_valid, "envelope must fail verification with an unrelated public key");
 
         Ok(())
@@ -183,7 +183,7 @@ mod tests {
         let manifest = Manifest::new(
             "test_root_hash".to_string(),
             5,
-            keypair.public_key.clone(),
+            keypair.public_key()?,
             None,
         );
 
@@ -195,7 +195,7 @@ mod tests {
         assert_eq!(restored.payload_type, envelope.payload_type);
         assert_eq!(restored.signatures, envelope.signatures);
 
-        let is_valid = restored.verify(&keypair.public_key)?;
+        let is_valid = restored.verify(&keypair.public_key()?)?;
         assert!(
             is_valid,
             "restored envelope must still verify after JSON roundtrip"

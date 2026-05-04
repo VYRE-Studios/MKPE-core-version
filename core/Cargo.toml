@@ -14,7 +14,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 # Cryptography
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
 sha2 = "0.10"
 rand = "0.8"
 
@@ -37,6 +37,17 @@ ureq = "2"
 
 # System info
 whoami = "1.4"
+
+# Hardware key support
+tss-esapi = { version = "7", optional = true }
+challenge_response = { version = "0.5", optional = true }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+hkdf = "0.12"
+
+[features]
+default = ["tpm", "yubikey"]
+tpm = ["tss-esapi"]
+yubikey = ["challenge_response"]
 
 [dev-dependencies]
 tempfile = "3"

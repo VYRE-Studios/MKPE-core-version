@@ -223,7 +223,7 @@ impl MkpeArchive {
     }
 
     /// Save archive to a .mkpe file using binary format v1.0
-    pub fn save<P: AsRef<Path>>(&self, path: P, keypair: &crate::crypto::KeyPair) -> Result<()> {
+    pub fn save<P: AsRef<Path>>(&self, path: P, keypair: &dyn crate::crypto::Signer) -> Result<()> {
         let mut file = File::create(path)?;
 
         // Section 1: Serialize manifest to canonical JSON (no extra whitespace)
@@ -268,7 +268,7 @@ impl MkpeArchive {
     pub fn save_with_encryption<P: AsRef<Path>>(
         &self,
         path: P,
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
         password: &str,
     ) -> Result<()> {
         let mut file = File::create(path)?;
@@ -328,7 +328,7 @@ impl MkpeArchive {
     pub fn save_compressed<P: AsRef<Path>>(
         &self,
         path: P,
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
     ) -> Result<()> {
         let mut file = File::create(path)?;
 
@@ -388,7 +388,7 @@ impl MkpeArchive {
         &self,
         manifest: &[u8],
         proof_data: &[u8],
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
     ) -> Result<Vec<u8>> {
         // Calculate SHA256 of all data to be signed
         let mut hasher = Sha256::new();
@@ -403,7 +403,7 @@ impl MkpeArchive {
 
         // Decode public key from base64
         let public_key_bytes = general_purpose::STANDARD
-            .decode(&keypair.public_key)
+            .decode(&keypair.public_key()?)
             .map_err(|e| MkpeError::BundleError(format!("Invalid public key: {}", e)))?;
 
         if public_key_bytes.len() != 32 {
@@ -957,7 +957,7 @@ const fn generate_crc32_table() -> [u32; 256] {
 /// Create a .mkpe bundle from a directory with optional ownership chain.
 pub fn create_mkpe_bundle_with_ownership<P: AsRef<Path>>(
     dir_path: P,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     output_path: P,
     ownership: Option<crate::ownership::OwnershipChain>,
 ) -> Result<MkpeArchive> {
@@ -973,7 +973,7 @@ pub fn create_mkpe_bundle_with_ownership<P: AsRef<Path>>(
     let mut manifest = Manifest::new(
         bundle.root_hash.clone(),
         bundle.proofs.len(),
-        keypair.public_key.clone(),
+        keypair.public_key()?,
         None,
     );
     manifest.sign(keypair)?;
@@ -991,7 +991,7 @@ pub fn create_mkpe_bundle_with_ownership<P: AsRef<Path>>(
 /// Create a .mkpe bundle from a directory (no ownership).
 pub fn create_mkpe_bundle<P: AsRef<Path>>(
     dir_path: P,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     output_path: P,
 ) -> Result<MkpeArchive> {
     create_mkpe_bundle_with_ownership(dir_path, keypair, output_path, None)
@@ -1015,7 +1015,7 @@ fn validate_bundle_output_path(artifact_path: &Path, output_path: &Path) -> Resu
 
 fn create_artifact_proofs(
     path: &Path,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     sidecar_path: Option<&Path>,
 ) -> Result<Vec<ProofItem>> {
     if path.is_file() {
@@ -1036,7 +1036,7 @@ fn create_artifact_proofs(
 fn collect_artifact_proofs(
     root: &Path,
     dir: &Path,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     sidecar_path: Option<&Path>,
     proofs: &mut Vec<ProofItem>,
 ) -> Result<()> {

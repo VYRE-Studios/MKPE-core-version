@@ -9,7 +9,7 @@
 //! - Merkle audit log
 
 use morse_kirby_core::*;
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use tempfile::TempDir;
 
@@ -111,8 +111,8 @@ fn test_manifest_verify_key_rotation_passes_for_trusted_key() -> Result<()> {
     let mut manifest = Manifest::new("hash123".to_string(), 3, keypair.public_key.clone(), None);
     manifest.sign(&keypair)?;
 
-    let mut trusted = BTreeMap::new();
-    trusted.insert(keypair.public_key.clone(), keypair);
+    let mut trusted = BTreeSet::new();
+    trusted.insert(keypair.public_key.clone());
 
     assert!(manifest.verify_key_rotation(&trusted, None)?);
     Ok(())
@@ -125,8 +125,8 @@ fn test_manifest_verify_key_rotation_fails_for_untrusted_key() -> Result<()> {
     let mut manifest = Manifest::new("hash123".to_string(), 3, keypair.public_key.clone(), None);
     manifest.sign(&keypair)?;
 
-    let mut trusted = BTreeMap::new();
-    trusted.insert(other.public_key.clone(), other);
+    let mut trusted = BTreeSet::new();
+    trusted.insert(other.public_key.clone());
 
     assert!(manifest.verify_key_rotation(&trusted, None).is_err());
     Ok(())
@@ -138,8 +138,8 @@ fn test_manifest_verify_key_rotation_fails_for_revoked_key() -> Result<()> {
     let mut manifest = Manifest::new("hash123".to_string(), 3, keypair.public_key.clone(), None);
     manifest.sign(&keypair)?;
 
-    let mut trusted = BTreeMap::new();
-    trusted.insert(keypair.public_key.clone(), keypair.clone());
+    let mut trusted = BTreeSet::new();
+    trusted.insert(keypair.public_key.clone());
 
     let rl = RevocationList {
         revoked_keys: vec![keypair.public_key.clone()],

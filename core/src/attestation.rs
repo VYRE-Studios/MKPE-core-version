@@ -1,6 +1,6 @@
 //! Build attestation support for MKPE Layer 3.
 
-use crate::{crypto::verify_signature, KeyPair, MkpeArchive, MkpeError, Result};
+use crate::{crypto::verify_signature, Signer, MkpeArchive, MkpeError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -204,7 +204,7 @@ impl BuildAttestation {
 
 pub fn create_build_attestation(
     subject_path: &Path,
-    keypair: &KeyPair,
+    keypair: &dyn Signer,
     options: AttestationOptions,
 ) -> Result<BuildAttestation> {
     let subject_kind = subject_kind(subject_path)?;
@@ -212,7 +212,7 @@ pub fn create_build_attestation(
     let (bundle_manifest_id, bundle_root_hash) = match options.bundle_path.as_ref() {
         Some(bundle_path) => {
             let archive = MkpeArchive::load(bundle_path)?;
-            archive.verify_artifact_with_public_key(subject_path, &keypair.public_key)?;
+            archive.verify_artifact_with_public_key(subject_path, &keypair.public_key()?)?;
             (
                 Some(archive.manifest.manifest_id),
                 Some(archive.manifest.bundle_root_hash),
@@ -234,7 +234,7 @@ pub fn create_build_attestation(
 		command: options.command,
 		timestamp_utc: chrono::Utc::now(),
 		attested_by: options.attested_by,
-		signer_public_key: keypair.public_key.clone(),
+			signer_public_key: keypair.public_key()?,
 		signature: String::new(),
 		nonce: Some(
 			std::time::SystemTime::now()

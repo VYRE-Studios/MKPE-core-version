@@ -126,8 +126,8 @@ impl Manifest {
 		}
     }
 
-    /// Sign this manifest with a keypair
-    pub fn sign(&mut self, keypair: &crate::crypto::KeyPair) -> Result<()> {
+	/// Sign this manifest with a keypair
+	pub fn sign(&mut self, keypair: &dyn crate::crypto::Signer) -> Result<()> {
         // Sign only the stable identity fields for deterministic signatures
         let manifest_data = serde_json::json!({
             "schema_version": self.schema_version,
@@ -209,14 +209,14 @@ impl Manifest {
 	/// Verify key metadata against a trusted key set and optional revocation list
 	pub fn verify_key_rotation(
 		&self,
-		trusted_keys: &std::collections::BTreeMap<String, crate::crypto::KeyPair>,
+		trusted_keys: &std::collections::BTreeSet<String>,
 		revocation_list: Option<&RevocationList>,
 	) -> Result<bool> {
-		let _key = trusted_keys
-			.get(&self.verifier_public_key)
-			.ok_or_else(|| crate::MkpeError::VerificationFailed(
+		if !trusted_keys.contains(&self.verifier_public_key) {
+			return Err(crate::MkpeError::VerificationFailed(
 				"Signing key is not in trusted key set".into(),
-			))?;
+			));
+		}
 
 		if let Some(rl) = revocation_list {
 			if rl.revoked_keys.contains(&self.verifier_public_key) {

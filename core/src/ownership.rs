@@ -181,12 +181,12 @@ impl TransferManifest {
     /// correctly attributed.
     pub fn sign(
         &mut self,
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
     ) -> Result<()> {
         let canonical = self.canonical()?;
         let sig = keypair.sign(&canonical)?;
         self.signatures.push(SignatureEntry {
-            key_id: keypair.key_id.clone(),
+            key_id: keypair.key_id(),
             signature: sig,
             timestamp: Utc::now(),
         });
@@ -273,18 +273,18 @@ impl RevocationEntry {
     pub fn new(
         target_transfer_id: String,
         reason: String,
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
     ) -> Result<Self> {
         let payload = canonical_revocation_payload(
             &target_transfer_id,
-            &keypair.key_id,
+            &keypair.key_id(),
             &reason,
         );
         let sig = keypair.sign(&payload)?;
 
         Ok(Self {
             target_transfer_id,
-            revoked_by: keypair.key_id.clone(),
+            revoked_by: keypair.key_id(),
             reason,
             timestamp: Utc::now(),
             revocation_signature: sig,
@@ -473,9 +473,9 @@ mod tests {
     use super::*;
     use crate::crypto::generate_keypair;
 
-    fn key_map(keypair: &crate::crypto::KeyPair) -> HashMap<String, String> {
+    fn key_map(keypair: &dyn crate::crypto::Signer) -> HashMap<String, String> {
         let mut m = HashMap::new();
-        m.insert(keypair.key_id.clone(), keypair.public_key.clone());
+        m.insert(keypair.key_id(), keypair.public_key().expect("public key"));
         m
     }
 

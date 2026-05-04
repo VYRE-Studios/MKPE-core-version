@@ -56,7 +56,11 @@ pub use ownership::{
     TransferStatus, TransferTerms,
 };
 pub use cdna::{CdnaEdge, CdnaNode, CdnaSchema};
-pub use crypto::{generate_keypair, KeyPair};
+pub use crypto::{
+    generate_keypair, generate_software_key, generate_tpm_key, generate_yubikey_key,
+    load_signing_key, Algorithm, KeyBackend, KeyPair, Signer, SigningKey,
+    TpmSealedKey, YubiKeyHmacKey,
+};
 pub use dsse::{DSSEEnvelope, DSSSignature, DSSE_PAYLOAD_TYPE};
 pub use error::{MkpeError, Result};
 	pub use manifest::{Manifest, SystemFingerprint, KeyMetadata, RevocationList};

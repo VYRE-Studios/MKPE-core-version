@@ -216,7 +216,7 @@ pub fn verify_inclusion_proof(proof: &MerkleInclusionProof, expected_root: &str)
 /// Create a proof item from a file
 pub fn create_proof_item<P: AsRef<Path>>(
     file_path: P,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
 ) -> Result<ProofItem> {
     let path = file_path.as_ref();
     let contents = std::fs::read(path)?;
@@ -246,7 +246,7 @@ pub fn create_proof_item<P: AsRef<Path>>(
 /// Create a proof bundle from multiple proof items
 pub fn create_proof_bundle(
     proofs: Vec<ProofItem>,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     parent_bundle_id: Option<String>,
 ) -> Result<ProofBundle> {
     let bundle_id = uuid::Uuid::new_v4().to_string();
@@ -335,7 +335,7 @@ pub fn verify_proof_bundle(bundle: &ProofBundle, public_key: &str) -> Result<boo
 /// Recursively create proofs for all files in a directory
 pub fn create_recursive_proofs<P: AsRef<Path>>(
     dir_path: P,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
 ) -> Result<Vec<ProofItem>> {
     let mut proofs = Vec::new();
     let root = dir_path.as_ref();
@@ -344,7 +344,7 @@ pub fn create_recursive_proofs<P: AsRef<Path>>(
         root: &Path,
         dir: &Path,
         proofs: &mut Vec<ProofItem>,
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
     ) -> Result<()> {
         if dir.is_dir() {
             for entry in std::fs::read_dir(dir)? {

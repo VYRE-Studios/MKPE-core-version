@@ -678,3 +678,22 @@ impl Manifest {
 - [x] CLI `mkpe verify --detailed` and `mkpe inspect` display ownership chain info
 - [x] 3 core unit tests (roundtrip with valid chain, backward compat without ownership, revoked chain fails verify)
 - [x] 1 CLI integration test (bundle with ownership roundtrip)
+
+### 6.8 Hardware Key Support (TPM 2.0 + YubiKey)
+
+- [x] `Signer` trait abstraction: `sign()`, `public_key()`, `key_id()`, `algorithm()`, `backend()`
+- [x] `SigningKey` enum: `Software(KeyPair)`, `TpmSealed(TpmSealedKey)`, `YubiKeyHmac(YubiKeyHmacKey)`
+- [x] `Algorithm` and `KeyBackend` enums for metadata and serialization
+- [x] `TpmSealedKey`: Ed25519 private key stored in TPM NV memory (owner-read/owner-write)
+- [x] `YubiKeyHmacKey`: Ed25519 seed derived from HMAC-SHA1 challenge-response via `challenge_response` crate
+- [x] `generate_tpm_key()` and `generate_yubikey_key()` public APIs
+- [x] `load_signing_key(path)` — tries `SigningKey` JSON first, falls back to legacy `KeyPair` format
+- [x] `SigningKey::with_key_id()` for deterministic key-id override (ownership commands)
+- [x] CLI `mkpe keygen --tpm` generates TPM-backed key as `mkpe_tpm.key.json`
+- [x] CLI `mkpe keygen --yubikey` generates YubiKey-backed key as `mkpe_yubikey.key.json`
+- [x] CLI `mkpe keygen` (default) still generates software keypair with backward-compatible file layout
+- [x] All signing commands (`sign`, `bundle`, `attest`, `dsse`, `multisig`, `ownership`) accept hardware keys
+- [x] DNA embed/extract commands gracefully error on hardware keys (private key not exportable)
+- [x] Full core + CLI refactor: all `&KeyPair` parameters changed to `&dyn Signer`
+- [x] Core backward compatibility: `KeyPair` implements `Signer`, all existing code continues to work
+- [x] 5 new core unit tests (SigningKey software roundtrip, with_key_id, load fallback, TPM stub error, YubiKey stub error)

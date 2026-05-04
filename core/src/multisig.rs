@@ -56,11 +56,11 @@ impl MultiSignatureManifest {
     }
 
     /// Sign the embedded manifest with a keypair and append the signature.
-    pub fn add_signature(&mut self, keypair: &crate::crypto::KeyPair) -> Result<()> {
+    pub fn add_signature(&mut self, keypair: &dyn crate::crypto::Signer) -> Result<()> {
         let canonical = canonical_manifest_json(&self.manifest)?;
         let sig = keypair.sign(canonical.as_bytes())?;
         self.multisig.signatures.push(SignatureInfo {
-            key_id: keypair.key_id.clone(),
+            key_id: keypair.key_id(),
             signature: sig,
             timestamp: Utc::now(),
         });

@@ -38,9 +38,17 @@ enum OutputFormat {
 enum Commands {
     /// Generate a new cryptographic keypair
     Keygen {
-        /// Output directory for keys
+        /// Output directory for keys (or JSON file for hardware keys)
         #[arg(short, long, default_value = ".")]
         output: PathBuf,
+
+        /// Generate a TPM-backed key (private key sealed in TPM NV memory)
+        #[arg(long, conflicts_with = "yubikey")]
+        tpm: bool,
+
+        /// Generate a YubiKey-backed key (derived from HMAC challenge-response)
+        #[arg(long, conflicts_with = "tpm")]
+        yubikey: bool,
     },
 
     /// Sign a file or directory
@@ -481,7 +489,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Keygen { output } => keygen_command(output, cli.verbose),
+        Commands::Keygen { output, tpm, yubikey } => keygen_command(output, cli.verbose, tpm, yubikey),
         Commands::Sign { path, key, output } => sign_command(path, key, output, cli.verbose),
         Commands::Verify { path, detailed } => verify_command(path, detailed, cli.verbose),
         Commands::Bundle { path, key, output, ownership } => {
@@ -506,9 +514,46 @@ fn main() -> Result<()> {
     }
 }
 
-fn keygen_command(output: PathBuf, verbose: bool) -> Result<()> {
-    println!("{}", "🔐 Generating Ed25519 keypair...".bold().cyan());
+fn keygen_command(output: PathBuf, verbose: bool, tpm: bool, yubikey: bool) -> Result<()> {
+    if tpm {
+        println!("{}", "🔐 Generating TPM-backed key...".bold().cyan());
+        let signing_key = morse_kirby_core::generate_tpm_key()
+            .context("TPM key generation failed — ensure a TPM 2.0 device is available")?;
 
+        let out_path = output.join("mkpe_tpm.key.json");
+        let json = serde_json::to_string_pretty(&signing_key)
+            .context("Failed to serialize TPM key")?;
+        std::fs::write(&out_path, json)
+            .context("Failed to write TPM key file")?;
+
+        println!("{}", "✓ TPM-backed key generated successfully!".green().bold());
+        println!("  {} {}", "Output:".bold(), out_path.display());
+        println!("  {} {}", "Key ID:".bold(), signing_key.key_id());
+        println!("  {} {}", "Public key:".bold(), &signing_key.public_key()?[..16]);
+        println!("  {} {}", "Backend:".bold(), "TPM 2.0 NV memory".cyan());
+        return Ok(());
+    }
+
+    if yubikey {
+        println!("{}", "🔐 Generating YubiKey-backed key...".bold().cyan());
+        let signing_key = morse_kirby_core::generate_yubikey_key()
+            .context("YubiKey key generation failed — ensure a YubiKey is plugged in")?;
+
+        let out_path = output.join("mkpe_yubikey.key.json");
+        let json = serde_json::to_string_pretty(&signing_key)
+            .context("Failed to serialize YubiKey key")?;
+        std::fs::write(&out_path, json)
+            .context("Failed to write YubiKey key file")?;
+
+        println!("{}", "✓ YubiKey-backed key generated successfully!".green().bold());
+        println!("  {} {}", "Output:".bold(), out_path.display());
+        println!("  {} {}", "Key ID:".bold(), signing_key.key_id());
+        println!("  {} {}", "Public key:".bold(), &signing_key.public_key()?[..16]);
+        println!("  {} {}", "Backend:".bold(), "YubiKey HMAC-derived".cyan());
+        return Ok(());
+    }
+
+    println!("{}", "🔐 Generating software Ed25519 keypair...".bold().cyan());
     let keypair = generate_keypair();
 
     std::fs::create_dir_all(&output).context("Failed to create key output directory")?;
@@ -569,24 +614,14 @@ fn sign_command(
     _verbose: bool,
 ) -> Result<()> {
     println!("{} {}", "🔏 Signing:".bold().cyan(), path.display());
+	
+	let signing_key = load_signing_key(&key_path)?;
+	
+	let output_path = output.unwrap_or_else(|| morse_kirby_core::default_sidecar_path(&path));
+	
+	let archive = create_mkpe_bundle(&path, &signing_key, &output_path)
+		.context("Failed to create MKPE bundle")?;
 
-    let private_key = std::fs::read_to_string(&key_path).context("Failed to read private key")?;
-
-    let public_key_path = key_path.with_file_name("mkpe_public.key");
-    let public_key = std::fs::read_to_string(&public_key_path)
-        .context("Failed to read public key (expected mkpe_public.key in same directory)")?;
-
-    let key_id = uuid::Uuid::new_v4().to_string();
-    let keypair = KeyPair::new(
-        private_key.trim().to_string(),
-        public_key.trim().to_string(),
-        key_id,
-    );
-
-    let output_path = output.unwrap_or_else(|| morse_kirby_core::default_sidecar_path(&path));
-
-    let archive = create_mkpe_bundle(&path, &keypair, &output_path)
-        .context("Failed to create MKPE bundle")?;
 
     let stats = archive.stats();
 
@@ -600,19 +635,37 @@ fn sign_command(
     Ok(())
 }
 
-fn load_keypair(key_path: &PathBuf) -> Result<KeyPair> {
-    let private_key = std::fs::read_to_string(key_path).context("Failed to read private key")?;
+fn load_signing_key(key_path: &PathBuf) -> Result<morse_kirby_core::SigningKey> {
+    let content = std::fs::read_to_string(key_path)
+        .context("Failed to read key file")?;
 
+    // Try new SigningKey JSON format first
+    if let Ok(sk) = serde_json::from_str::<morse_kirby_core::SigningKey>(&content) {
+        return Ok(sk);
+    }
+
+    // Fall back to legacy format: raw private key + separate public key file
+    let private_key = content.trim().to_string();
     let public_key_path = key_path.with_file_name("mkpe_public.key");
     let public_key = std::fs::read_to_string(&public_key_path)
         .context("Failed to read public key (expected mkpe_public.key in same directory)")?;
-
     let key_id = uuid::Uuid::new_v4().to_string();
-    Ok(KeyPair::new(
-        private_key.trim().to_string(),
+    let kp = morse_kirby_core::KeyPair::new(
+        private_key,
         public_key.trim().to_string(),
         key_id,
-    ))
+    );
+    Ok(morse_kirby_core::SigningKey::Software(kp))
+}
+
+/// Extract the software KeyPair from a SigningKey, erroring on hardware keys.
+fn require_software_key(signing_key: &morse_kirby_core::SigningKey) -> Result<&morse_kirby_core::KeyPair> {
+    match signing_key {
+        morse_kirby_core::SigningKey::Software(kp) => Ok(kp),
+        _ => Err(anyhow::anyhow!(
+            "This command requires a software key. Hardware-backed keys do not expose private key material."
+        )),
+    }
 }
 
 fn verify_command(path: PathBuf, detailed: bool, verbose: bool) -> Result<()> {
@@ -675,7 +728,7 @@ fn bundle_command(
 ) -> Result<()> {
     println!("{} {}", "🗂️  Bundling:".bold().cyan(), path.display());
 
-    let keypair = load_keypair(&key_path)?;
+    let signing_key = load_signing_key(&key_path)?;
 
     let ownership_chain = if let Some(ref opath) = ownership {
         let json = std::fs::read_to_string(opath)
@@ -688,7 +741,7 @@ fn bundle_command(
     };
 
     let archive = morse_kirby_core::create_mkpe_bundle_with_ownership(
-        &path, &keypair, &output, ownership_chain
+        &path, &signing_key, &output, ownership_chain
     )
     .context("Failed to create MKPE bundle")?;
 
@@ -838,13 +891,13 @@ fn validate_cdna_command(
             std::fs::read_to_string(&public_key_path).context("Failed to read public key")?;
 
         let key_id = uuid::Uuid::new_v4().to_string();
-        let keypair = KeyPair::new(
+        let signing_key = morse_kirby_core::SigningKey::Software(KeyPair::new(
             private_key.trim().to_string(),
             public_key.trim().to_string(),
             key_id,
-        );
+        ));
 
-        let proof = schema.create_proof(&keypair)?;
+        let proof = schema.create_proof(&signing_key)?;
 
         let proof_path = path.with_extension("cdna.proof.json");
         let proof_json = serde_json::to_string_pretty(&proof)?;
@@ -870,8 +923,8 @@ fn dna_command(command: DnaCommands, verbose: bool, format: OutputFormat) -> Res
         } => {
             let output_path =
                 output.unwrap_or_else(|| morse_kirby_core::default_sidecar_path(&artifact));
-            let keypair = load_keypair(&key)?;
-            let archive = create_mkpe_bundle(&artifact, &keypair, &output_path)
+            let signing_key = load_signing_key(&key)?;
+            let archive = create_mkpe_bundle(&artifact, &signing_key, &output_path)
                 .context("Failed to create MKPE DNA proof")?;
             let stats = archive.stats();
 
@@ -1005,9 +1058,10 @@ fn dna_embed_command(
         hasher.finalize().into()
     };
 
-    let keypair = load_keypair(key_path)?;
+    let signing_key = load_signing_key(key_path)?;
+    let software_key = require_software_key(&signing_key)?;
     let key_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&keypair.private_key)
+        .decode(&software_key.private_key)
         .map_err(|e| anyhow::anyhow!("Failed to decode private key: {}", e))?;
     if key_bytes.len() != 32 {
         return Err(anyhow::anyhow!("Private key must be 32 bytes for DNA secret derivation"));
@@ -1070,9 +1124,10 @@ fn dna_extract_command(
     format: OutputFormat,
     mime_type: Option<&str>,
 ) -> Result<()> {
-    let keypair = load_keypair(key_path)?;
+    let signing_key = load_signing_key(key_path)?;
+    let software_key = require_software_key(&signing_key)?;
     let key_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&keypair.private_key)
+        .decode(&software_key.private_key)
         .map_err(|e| anyhow::anyhow!("Failed to decode private key: {}", e))?;
     if key_bytes.len() != 32 {
         return Err(anyhow::anyhow!("Private key must be 32 bytes for DNA secret derivation"));
@@ -1147,10 +1202,10 @@ fn attest_command(command: AttestCommands, format: OutputFormat) -> Result<()> {
             attested_by,
             command,
         } => {
-            let keypair = load_keypair(&key)?;
+            let signing_key = load_signing_key(&key)?;
             let attestation = create_build_attestation(
                 &subject,
-                &keypair,
+                &signing_key,
                 AttestationOptions {
                     attested_by,
                     command,
@@ -1383,9 +1438,9 @@ fn load_manifest(path: &PathBuf) -> Result<Manifest> {
 fn dsse_command(command: DsseCommands, format: OutputFormat) -> Result<()> {
 	match command {
 		DsseCommands::Create { manifest: manifest_path, key, output } => {
-			let keypair = load_keypair(&key)?;
+			let signing_key = load_signing_key(&key)?;
 			let manifest = load_manifest(&manifest_path)?;
-			let envelope = DSSEEnvelope::from_manifest(&manifest, &keypair)
+			let envelope = DSSEEnvelope::from_manifest(&manifest, &signing_key)
 				.map_err(|e| anyhow::anyhow!("Failed to create DSSE envelope: {}", e))?;
 			let json = envelope.to_json()
 				.map_err(|e| anyhow::anyhow!("Failed to serialize DSSE envelope: {}", e))?;
@@ -1509,10 +1564,10 @@ fn multisig_command(command: MultisigCommands, format: OutputFormat) -> Result<(
 			}
 		}
 		MultisigCommands::Add { manifest: manifest_path, key, output } => {
-			let keypair = load_keypair(&key)?;
+			let signing_key = load_signing_key(&key)?;
 			let content = std::fs::read_to_string(&manifest_path).context("Failed to read manifest")?;
 			let mut msm: MultiSignatureManifest = serde_json::from_str(&content).context("Failed to parse multi-signature manifest")?;
-			msm.add_signature(&keypair)
+			msm.add_signature(&signing_key)
 				.map_err(|e| anyhow::anyhow!("Failed to add signature: {}", e))?;
 			let out_path = output.unwrap_or(manifest_path);
 			let json = serde_json::to_string_pretty(&msm)?;
@@ -1621,9 +1676,9 @@ fn ownership_transfer_command(
     max_resales: Option<u32>,
     format: OutputFormat,
 ) -> Result<()> {
-    let mut seller = load_keypair(&from_key)?;
-    seller.key_id = public_key_to_key_id(&seller.public_key);
-
+    let seller = load_signing_key(&from_key)?;
+    let seller_key_id = public_key_to_key_id(&seller.public_key()?);
+    let seller = seller.with_key_id(seller_key_id);
     let buyer_pubkey = std::fs::read_to_string(&to_key)
         .with_context(|| format!("Failed to read buyer public key: {}", to_key.display()))?;
     let buyer_pubkey = buyer_pubkey.trim().to_string();
@@ -1644,7 +1699,7 @@ fn ownership_transfer_command(
         custom: std::collections::HashMap::new(),
     };
 
-    let mut required_signers = vec![seller.key_id.clone(), buyer_key_id.clone()];
+    let mut required_signers = vec![seller.key_id(), buyer_key_id.clone()];
     if let Some(ref mkid) = marketplace_key_id {
         required_signers.push(mkid.clone());
     }
@@ -1652,7 +1707,7 @@ fn ownership_transfer_command(
     let mut manifest = morse_kirby_core::TransferManifest::new(
         asset.clone(),
         Some(previous.clone()),
-        seller.key_id.clone(),
+        seller.key_id(),
         buyer_key_id,
         marketplace_key_id,
         nonce,
@@ -1666,9 +1721,10 @@ fn ownership_transfer_command(
 
     // Marketplace signs if provided
     if let Some(ref path) = marketplace_key {
-        let mut market_keypair = load_keypair(path)
-            .with_context(|| "Failed to load marketplace keypair for signing")?;
-        market_keypair.key_id = public_key_to_key_id(&market_keypair.public_key);
+        let market_keypair = load_signing_key(path)
+            .with_context(|| "Failed to load marketplace key for signing")?;
+        let market_key_id = public_key_to_key_id(&market_keypair.public_key()?);
+        let market_keypair = market_keypair.with_key_id(market_key_id);
         manifest.sign(&market_keypair)
             .with_context(|| "Marketplace failed to sign transfer manifest")?;
     }
@@ -1686,7 +1742,7 @@ fn ownership_transfer_command(
                 "transfer_id": manifest.transfer_id,
                 "asset": asset,
                 "previous": previous,
-                "from": seller.key_id,
+                "from": seller.key_id(),
                 "to": manifest.to_key_id,
                 "output": output,
                 "executed": manifest.is_valid(),
@@ -1696,7 +1752,7 @@ fn ownership_transfer_command(
         println!("{}", "Ownership transfer manifest created".green().bold());
         println!("  {} {}", "Transfer ID:".bold(), manifest.transfer_id);
         println!("  {} {}", "Asset:".bold(), asset);
-        println!("  {} {}", "From:".bold(), seller.key_id);
+        println!("  {} {}", "From:".bold(), seller.key_id());
         println!("  {} {}", "To:".bold(), manifest.to_key_id);
         println!("  {} {}", "Output:".bold(), output.display());
         if manifest.is_valid() {
@@ -1719,11 +1775,12 @@ fn ownership_sign_command(
     let mut manifest: morse_kirby_core::TransferManifest = serde_json::from_str(&json)
         .with_context(|| "Failed to parse transfer manifest JSON")?;
 
-    let mut keypair = load_keypair(key_path)?;
-    keypair.key_id = public_key_to_key_id(&keypair.public_key);
+    let signing_key = load_signing_key(key_path)?;
+    let key_id = public_key_to_key_id(&signing_key.public_key()?);
+    let signing_key = signing_key.with_key_id(key_id);
     manifest
-        .sign(&keypair)
-        .with_context(|| format!("Failed to sign manifest with key {}", keypair.key_id))?;
+        .sign(&signing_key)
+        .with_context(|| format!("Failed to sign manifest with key {}", signing_key.key_id()))?;
 
     let updated = serde_json::to_string_pretty(&manifest)
         .with_context(|| "Failed to serialize updated manifest")?;
@@ -1736,7 +1793,7 @@ fn ownership_sign_command(
             serde_json::json!({
                 "status": "signed",
                 "transfer_id": manifest.transfer_id,
-                "signer": keypair.key_id,
+                "signer": signing_key.key_id(),
                 "executed": manifest.is_valid(),
                 "output": output,
             })
@@ -1744,7 +1801,7 @@ fn ownership_sign_command(
     } else {
         println!("{}", "Transfer manifest signed".green().bold());
         println!("  {} {}", "Transfer ID:".bold(), manifest.transfer_id);
-        println!("  {} {}", "Signer:".bold(), keypair.key_id);
+        println!("  {} {}", "Signer:".bold(), signing_key.key_id());
         if manifest.is_valid() {
             println!("  {}", "Status: Executed (all required signatures present)".green().bold());
         } else {
@@ -1859,14 +1916,15 @@ fn ownership_revoke_command(
     output: &PathBuf,
     format: OutputFormat,
 ) -> Result<()> {
-    let mut keypair = load_keypair(key_path)?;
-    keypair.key_id = public_key_to_key_id(&keypair.public_key);
+    let signing_key = load_signing_key(key_path)?;
+    let key_id = public_key_to_key_id(&signing_key.public_key()?);
+    let signing_key = signing_key.with_key_id(key_id);
     let revocation = morse_kirby_core::RevocationEntry::new(
         transfer_id.to_string(),
         reason.to_string(),
-        &keypair,
+        &signing_key,
     )
-    .with_context(|| "Failed to create revocation entry")?;
+	.with_context(|| "Failed to create revocation entry")?;
 
     let json = serde_json::to_string_pretty(&revocation)
         .with_context(|| "Failed to serialize revocation entry")?;
@@ -1879,7 +1937,7 @@ fn ownership_revoke_command(
             serde_json::json!({
                 "status": "revoked",
                 "transfer_id": transfer_id,
-                "revoked_by": keypair.key_id,
+                "revoked_by": signing_key.key_id(),
                 "reason": reason,
                 "output": output,
             })
@@ -1887,7 +1945,7 @@ fn ownership_revoke_command(
     } else {
         println!("{}", "Revocation entry created".green().bold());
         println!("  {} {}", "Transfer ID:".bold(), transfer_id);
-        println!("  {} {}", "Revoked by:".bold(), keypair.key_id);
+        println!("  {} {}", "Revoked by:".bold(), signing_key.key_id());
         println!("  {} {}", "Reason:".bold(), reason);
         println!("  {} {}", "Output:".bold(), output.display());
     }
