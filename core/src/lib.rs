@@ -30,15 +30,23 @@ pub mod proof;
 pub mod multisig;
 pub mod policy;
 pub mod ownership;
+pub mod policy_v2;
 pub mod stego;
 pub mod timestamp;
+
+
+
+	pub mod intoto;
+	pub mod slsa;
 
 pub mod dna;
 pub mod format_dna;
 	pub use attestation::{
-	    create_build_attestation, hash_subject, verify_build_attestation, AttestationOptions,
-	    AttestationSubjectKind, AttestationVerificationOptions, AttestationVerificationReport,
-	    BuildAttestation, BuildFingerprint, BuildInfo, Dependency,
+	    create_build_attestation, hash_subject, verify_build_attestation,
+	    verify_legacy_build_attestation,
+	    AttestationOptions, AttestationSubjectKind, AttestationVerificationOptions,
+	    AttestationVerificationReport, BuildAttestation, BuildFingerprint, BuildInfo,
+	    Dependency, SlsaProvenanceAttestation,
 	};
 pub use audit::{AuditEvent, AuditEventType, AuditLog};
 pub use bundle::{
@@ -73,6 +81,8 @@ pub use error::{MkpeError, Result};
 	};
 
 	/// MKPE version constant
+	pub use intoto::{DigestSet, IN_TOTO_STATEMENT_TYPE, Statement, Subject};
+	pub use slsa::{BuildDefinition, BuildMetadata, Builder, Byproduct, ProvenancePredicate, ResolvedDependency, RunDetails, SLSA_PROVENANCE_PREDICATE_TYPE};
 	pub const MKPE_VERSION: &str = "1.2.0-mkpe";
 
 /// MKPE schema version
