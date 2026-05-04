@@ -31,6 +31,7 @@ pub mod multisig;
 pub mod policy;
 pub mod ownership;
 pub mod policy_v2;
+pub mod genesis;
 pub mod stego;
 pub mod timestamp;
 
@@ -63,6 +64,7 @@ pub use ownership::{
     OwnershipChain, RevocationEntry, SignatureEntry, TransferManifest,
     TransferStatus, TransferTerms,
 };
+pub use genesis::{GenesisCertificate, GenesisId, GenesisCertificateBuilder, ArtifactDescription, CreatorInfo, ContributorEntry, ContributorRole, VerificationReport};
 pub use cdna::{CdnaEdge, CdnaNode, CdnaSchema};
 pub use crypto::{
     generate_keypair, generate_software_key, generate_tpm_key, generate_yubikey_key,
