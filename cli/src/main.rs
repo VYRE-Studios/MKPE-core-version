@@ -166,7 +166,93 @@ enum Commands {
 	Ownership {
 		#[command(subcommand)]
 		command: OwnershipCommands,
-	}
+	},
+
+    /// Verify a SLSA build provenance attestation (DSSE-wrapped in-toto v1
+    /// Statement). Validates the DSSE envelope, checks the ed25519 signature
+    /// against the supplied public key, validates the Statement against
+    /// MKPE's JSON Schema, and optionally verifies that the subject digest
+    /// matches an artifact on disk.
+    ///
+    /// Exit codes (stable contract for CI consumers):
+    ///   0  attestation valid (and artifact matches if --artifact supplied)
+    ///   2  signature invalid or wrong key
+    ///   3  schema validation failed
+    ///   4  artifact digest mismatch
+    ///   5  malformed envelope (parse / base64 / payload type)
+    ///   6  legacy unsigned attestation (with --legacy)
+    ///   1  any other error
+    VerifyAttestation {
+        /// Path to the DSSE envelope JSON file (typically `*.intoto.jsonl`
+        /// or `*.attestation.json`). With --legacy, the path to a
+        /// pre-Phase-1.5 `build_attestation.json` instead.
+        path: PathBuf,
+
+        /// Base64-encoded ed25519 public key, OR a path to a file containing
+        /// one. Required for normal verification; optional with --legacy.
+        #[arg(short = 'k', long)]
+        pubkey: Option<String>,
+
+        /// Optional artifact to cross-check. When supplied, the file's
+        /// SHA-256 must match one of the subjects in the Statement.
+        #[arg(short = 'a', long)]
+        artifact: Option<PathBuf>,
+
+        /// Emit machine-readable JSON instead of human-formatted output.
+        /// Useful for CI consumers and `mkpe verify-release` composition.
+        #[arg(long)]
+        json: bool,
+
+        /// Read the file as a pre-Phase-1.5 `build_attestation.json` rather
+        /// than as a DSSE envelope. Legacy files are NOT cryptographically
+        /// verifiable (the format had no real signature), so this mode is
+        /// strictly informational and exits with code 6 to make it
+        /// impossible to confuse with a real attestation.
+        #[arg(long)]
+        legacy: bool,
+    },
+
+    /// Produce a signed SLSA Build Provenance v1.0 attestation for an
+    /// artifact. Reads the build context (source URI, ref, runner,
+    /// toolchain, builder identity, timestamps) from a JSON file, hashes
+    /// the artifact, parses Cargo.lock for the dependency closure,
+    /// assembles an in-toto Statement, and signs it into a DSSE envelope.
+    ///
+    /// Intended for CI use: a release workflow assembles `--context`
+    /// from `${{ github.* }}` variables, then invokes this command to
+    /// emit the attestation alongside the artifact.
+    BuildAttestation {
+        /// Artifact to attest. Its SHA-256 becomes the subject digest.
+        #[arg(short = 'a', long)]
+        artifact: PathBuf,
+
+        /// Path to Cargo.lock for the build. Each `[[package]]` with a
+        /// registry checksum becomes a `resolvedDependency`.
+        #[arg(short = 'l', long, default_value = "Cargo.lock")]
+        lockfile: PathBuf,
+
+        /// JSON file containing the build context. See
+        /// `BuildContextSpec` in `morse_kirby_core::provenance::producer`
+        /// for the schema.
+        #[arg(short = 'c', long)]
+        context: PathBuf,
+
+        /// Private signing key file (base64-encoded 32-byte ed25519).
+        /// Must be paired with a `mkpe_public.key` alongside it.
+        #[arg(short = 'k', long)]
+        key: PathBuf,
+
+        /// Output path for the DSSE envelope. Convention:
+        /// `<artifact>.intoto.jsonl` or `<artifact>.attestation.json`.
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+
+        /// Override the subject name in the attestation. Defaults to the
+        /// artifact's file name. Useful when the build path differs from
+        /// the released filename.
+        #[arg(long)]
+        artifact_name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -511,6 +597,12 @@ fn main() -> Result<()> {
 		Commands::Audit { command } => audit_command(command, cli.format),
 		Commands::Multisig { command } => multisig_command(command, cli.format),
 		Commands::Ownership { command } => ownership_command(command, cli.format),
+        Commands::VerifyAttestation { path, pubkey, artifact, json, legacy } => {
+            verify_attestation_command(path, pubkey, artifact, json, legacy, cli.verbose)
+        }
+        Commands::BuildAttestation { artifact, lockfile, context, key, output, artifact_name } => {
+            build_attestation_command(artifact, lockfile, context, key, output, artifact_name, cli.verbose)
+        }
     }
 }
 
@@ -1993,4 +2085,353 @@ fn load_public_keys(spec: &str) -> Result<std::collections::HashMap<String, Stri
     }
 
     Ok(map)
+}
+
+// ---------------------------------------------------------------------------
+// SLSA Build Provenance v1.0 -- DSSE-wrapped in-toto v1 Statements
+// ---------------------------------------------------------------------------
+
+/// Stable exit codes for `verify-attestation`. CI consumers branch on these,
+/// so adding new codes is fine; renumbering existing ones is a breaking change.
+mod verify_exit {
+    pub const SIG_INVALID: i32 = 2;
+    pub const SCHEMA_INVALID: i32 = 3;
+    pub const ARTIFACT_MISMATCH: i32 = 4;
+    pub const MALFORMED_ENVELOPE: i32 = 5;
+    pub const LEGACY_UNSIGNED: i32 = 6;
+}
+
+fn verify_attestation_command(
+    path: PathBuf,
+    pubkey_arg: Option<String>,
+    artifact: Option<PathBuf>,
+    json_output: bool,
+    legacy: bool,
+    verbose: bool,
+) -> Result<()> {
+    use morse_kirby_core::{DsseEnvelope, MkpeError};
+
+    if legacy {
+        return verify_legacy_attestation(path, json_output);
+    }
+
+    let pubkey_b64 = match pubkey_arg {
+        Some(arg) => slsa_resolve_pubkey(&arg).context("Failed to resolve --pubkey argument")?,
+        None => {
+            anyhow::bail!(
+                "--pubkey is required for non-legacy verification. \
+                 Pass a base64-encoded ed25519 public key or a path to a key file. \
+                 To inspect a legacy `build_attestation.json` without verification, add --legacy."
+            );
+        }
+    };
+
+    let envelope_bytes = std::fs::read(&path)
+        .with_context(|| format!("Failed to read attestation file: {}", path.display()))?;
+
+    let envelope: DsseEnvelope = match serde_json::from_slice(&envelope_bytes) {
+        Ok(env) => env,
+        Err(e) => {
+            slsa_emit_failure(json_output, "malformed_envelope", &e.to_string(), &path);
+            std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+        }
+    };
+
+    let statement = match envelope.verify(&pubkey_b64) {
+        Ok(s) => s,
+        Err(MkpeError::VerificationFailed(msg)) => {
+            slsa_emit_failure(json_output, "signature_invalid", &msg, &path);
+            std::process::exit(verify_exit::SIG_INVALID);
+        }
+        Err(MkpeError::SchemaValidation(msg)) => {
+            slsa_emit_failure(json_output, "schema_invalid", &msg, &path);
+            std::process::exit(verify_exit::SCHEMA_INVALID);
+        }
+        Err(MkpeError::DsseError(msg)) => {
+            slsa_emit_failure(json_output, "malformed_envelope", &msg, &path);
+            std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+        }
+        Err(MkpeError::JsonError(e)) => {
+            slsa_emit_failure(json_output, "malformed_envelope", &e.to_string(), &path);
+            std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+        }
+        Err(other) => return Err(other.into()),
+    };
+
+    if let Some(artifact_path) = artifact.as_ref() {
+        let actual = slsa_hash_file_sha256(artifact_path).with_context(|| {
+            format!("Failed to hash artifact: {}", artifact_path.display())
+        })?;
+        let matched = statement
+            .subject
+            .iter()
+            .any(|s| s.digest.sha256.eq_ignore_ascii_case(&actual));
+        if !matched {
+            let names: Vec<&str> = statement.subject.iter().map(|s| s.name.as_str()).collect();
+            slsa_emit_failure(
+                json_output,
+                "artifact_mismatch",
+                &format!(
+                    "artifact sha256={actual} does not match any subject digest (subjects: {names:?})"
+                ),
+                &path,
+            );
+            std::process::exit(verify_exit::ARTIFACT_MISMATCH);
+        }
+    }
+
+    slsa_emit_success(json_output, &path, &statement, artifact.as_deref(), verbose);
+    Ok(())
+}
+
+/// Inspect a pre-Phase-1.5 `build_attestation.json`. These files contained
+/// a placeholder signature string and were never actually signed -- they
+/// were documentation artifacts describing a freeze event. We parse them
+/// for the user's benefit (so they can see what the freeze claimed), but
+/// we ALWAYS exit with code 6 to make it impossible to mistake this for a
+/// real cryptographic verification.
+fn verify_legacy_attestation(path: PathBuf, json_output: bool) -> Result<()> {
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("Failed to read legacy attestation: {}", path.display()))?;
+
+    let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            slsa_emit_failure(json_output, "malformed_envelope", &e.to_string(), &path);
+            std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+        }
+    };
+
+    let engine_version = parsed.get("engine_version").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+    let manifest_id = parsed
+        .get("engine_manifest_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("<unknown>");
+    let root_hash = parsed.get("root_hash").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+    let timestamp = parsed.get("timestamp_utc").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+    let attested_by = parsed.get("attested_by").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+    let signature = parsed.get("signature").and_then(|v| v.as_str()).unwrap_or("");
+    let placeholder = signature.starts_with("To be generated") || signature.is_empty();
+
+    if json_output {
+        let report = serde_json::json!({
+            "ok": false,
+            "code": "legacy_unsigned",
+            "message": "legacy build_attestation.json: documentation artifact, not a verifiable attestation",
+            "attestation_path": path.display().to_string(),
+            "claims": {
+                "engine_version": engine_version,
+                "manifest_id": manifest_id,
+                "root_hash": root_hash,
+                "timestamp_utc": timestamp,
+                "attested_by": attested_by,
+                "signature_present": !placeholder,
+            },
+        });
+        println!("{}", serde_json::to_string(&report).unwrap_or_default());
+    } else {
+        eprintln!("{}", "⚠ Legacy attestation: UNVERIFIABLE".yellow().bold());
+        eprintln!();
+        eprintln!(
+            "This file uses the pre-Phase-1.5 attestation format. The format had no\n\
+             actual cryptographic signature; it was a self-documenting JSON file\n\
+             describing a freeze event. It is preserved for historical context only."
+        );
+        eprintln!();
+        eprintln!("{}", "File claims (informational, NOT cryptographically verified):".bold());
+        eprintln!("  {} {}", "Engine version:".bold(), engine_version);
+        eprintln!("  {} {}", "Manifest ID:   ".bold(), manifest_id);
+        eprintln!("  {} {}", "Root hash:     ".bold(), root_hash);
+        eprintln!("  {} {}", "Timestamp:     ".bold(), timestamp);
+        eprintln!("  {} {}", "Attested by:   ".bold(), attested_by);
+        if placeholder {
+            eprintln!(
+                "  {} {}",
+                "Signature:     ".bold(),
+                "<placeholder -- file was never signed>".red()
+            );
+        } else {
+            eprintln!("  {} {}", "Signature:     ".bold(), "<present, but format is non-standard>".yellow());
+        }
+        eprintln!();
+        eprintln!(
+            "To produce a real, signed attestation for the current build, use:\n  \
+             mkpe build-attestation --artifact <path> --context <ctx.json> \\\n    \
+                                    --key <key> --output <envelope.intoto.jsonl>"
+        );
+    }
+
+    std::process::exit(verify_exit::LEGACY_UNSIGNED);
+}
+
+fn build_attestation_command(
+    artifact: PathBuf,
+    lockfile: PathBuf,
+    context: PathBuf,
+    key_path: PathBuf,
+    output: PathBuf,
+    artifact_name: Option<String>,
+    verbose: bool,
+) -> Result<()> {
+    use morse_kirby_core::{produce_attestation, BuildContext, BuildContextSpec, KeyPair};
+
+    println!("{} {}", "📝 Building attestation for:".bold().cyan(), artifact.display());
+
+    let spec: BuildContextSpec = {
+        let text = std::fs::read_to_string(&context)
+            .with_context(|| format!("Failed to read context file: {}", context.display()))?;
+        serde_json::from_str(&text)
+            .with_context(|| format!("Failed to parse context JSON at {}", context.display()))?
+    };
+
+    let ctx = BuildContext::from_spec(spec, artifact.clone(), lockfile, artifact_name)
+        .context("Failed to assemble BuildContext from spec")?;
+
+    let private_key = std::fs::read_to_string(&key_path)
+        .with_context(|| format!("Failed to read private key: {}", key_path.display()))?;
+    let public_key_path = key_path.with_file_name("mkpe_public.key");
+    let public_key = std::fs::read_to_string(&public_key_path).with_context(|| {
+        format!(
+            "Failed to read public key (expected {} alongside the private key)",
+            public_key_path.display()
+        )
+    })?;
+    let key = KeyPair::new(
+        private_key.trim().to_string(),
+        public_key.trim().to_string(),
+        uuid::Uuid::new_v4().to_string(),
+    );
+
+    let result = produce_attestation(&ctx, &key).context("Failed to produce attestation")?;
+
+    for w in &result.warnings {
+        eprintln!("{} {}", "⚠".yellow().bold(), w.yellow());
+    }
+
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create output directory: {}", parent.display())
+            })?;
+        }
+    }
+    let json = serde_json::to_string_pretty(&result.envelope)
+        .context("Failed to serialize DSSE envelope")?;
+    std::fs::write(&output, json)
+        .with_context(|| format!("Failed to write attestation: {}", output.display()))?;
+
+    println!("{}", "✓ Attestation produced".green().bold());
+    println!("  {} {}", "Output:".bold(), output.display());
+    println!(
+        "  {} {} subject(s)",
+        "Subjects:".bold(),
+        result.statement.subject.len()
+    );
+    println!(
+        "  {} {}",
+        "Builder:".bold(),
+        result.statement.predicate.run_details.builder.id
+    );
+    println!(
+        "  {} {} dependency digest(s)",
+        "Resolved:".bold(),
+        result
+            .statement
+            .predicate
+            .build_definition
+            .resolved_dependencies
+            .len()
+    );
+    if !result.warnings.is_empty() {
+        println!(
+            "  {} {} (see stderr)",
+            "Warnings:".bold(),
+            result.warnings.len()
+        );
+    }
+    if verbose {
+        for s in &result.statement.subject {
+            println!("    - {} sha256={}", s.name, s.digest.sha256);
+        }
+    }
+    Ok(())
+}
+
+fn slsa_resolve_pubkey(arg: &str) -> Result<String> {
+    let trimmed = arg.trim();
+    let as_path = PathBuf::from(trimmed);
+    if as_path.is_file() {
+        Ok(std::fs::read_to_string(&as_path)
+            .with_context(|| format!("Failed to read pubkey file: {}", as_path.display()))?
+            .trim()
+            .to_string())
+    } else {
+        Ok(trimmed.to_string())
+    }
+}
+
+fn slsa_hash_file_sha256(p: &std::path::Path) -> Result<String> {
+    let bytes = std::fs::read(p)?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Ok(hex::encode(h.finalize()))
+}
+
+fn slsa_emit_failure(json_output: bool, code: &str, message: &str, path: &std::path::Path) {
+    if json_output {
+        let payload = serde_json::json!({
+            "ok": false,
+            "code": code,
+            "message": message,
+            "attestation_path": path.display().to_string(),
+        });
+        println!("{}", serde_json::to_string(&payload).unwrap_or_default());
+    } else {
+        eprintln!("{}", "✗ Verification FAILED".red().bold());
+        eprintln!("  {} {}", "Reason:".bold(), code);
+        eprintln!("  {} {}", "Detail:".bold(), message);
+    }
+}
+
+fn slsa_emit_success(
+    json_output: bool,
+    path: &std::path::Path,
+    statement: &morse_kirby_core::Statement,
+    artifact: Option<&std::path::Path>,
+    verbose: bool,
+) {
+    if json_output {
+        let payload = serde_json::json!({
+            "ok": true,
+            "attestation_path": path.display().to_string(),
+            "artifact_path": artifact.map(|p| p.display().to_string()),
+            "builder_id": statement.predicate.run_details.builder.id,
+            "build_type": statement.predicate.build_definition.build_type,
+            "subjects": statement.subject.iter().map(|s| serde_json::json!({
+                "name": s.name,
+                "sha256": s.digest.sha256,
+            })).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string(&payload).unwrap_or_default());
+        return;
+    }
+
+    println!("{}", "✓ Attestation VALID".green().bold());
+    println!("  {} {}", "Builder:".bold(), statement.predicate.run_details.builder.id);
+    println!("  {} {}", "Build type:".bold(), statement.predicate.build_definition.build_type);
+    println!("  {} {}", "Subjects:".bold(), statement.subject.len());
+    if verbose {
+        for s in &statement.subject {
+            println!("    - {} sha256={}", s.name, s.digest.sha256);
+        }
+        println!(
+            "  {} {}..{}",
+            "Run:".bold(),
+            statement.predicate.run_details.metadata.started_on,
+            statement.predicate.run_details.metadata.finished_on
+        );
+    }
+    if let Some(p) = artifact {
+        println!("  {} {}", "Artifact:".bold(), p.display());
+    }
 }

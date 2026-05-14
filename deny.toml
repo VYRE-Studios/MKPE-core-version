@@ -1,0 +1,220 @@
+# MKPE supply-chain policy for cargo-deny.
+#
+# Run locally:
+#   cargo deny check
+#
+# CI runs this on every PR via .github/workflows/supply-chain.yml (added in
+# Phase 2). A failing cargo-deny check is a hard block on merge.
+#
+# Tightening this file is welcome. Loosening it requires a documented reason
+# in the same PR -- "the build broke" is not a reason; "we evaluated and
+# accepted the risk for crate X because Y" is.
+
+# ----------------------------------------------------------------------------
+# Target graph -- what platforms we audit
+# ----------------------------------------------------------------------------
+#
+# cargo-deny evaluates the dep tree across every target platform by default.
+# That made sense before Phase 1.7 because we hadn't declared a release
+# scope; now we have. SLSA_PLAN.md "Decisions Locked" pins the initial
+# release targets to the two Windows triples, and our CI workflow
+# (release.yml) only emits attestations for those.
+#
+# Restricting cargo-deny to the same two triples aligns the supply-chain
+# policy with the actual ship surface. Linux-only transitives (the entire
+# gtk-rs chain pulled by tray-icon's Linux backend) drop out of the audit
+# because they cannot reach a released MKPE binary -- if a future phase
+# adds Linux/macOS to the release matrix, this list expands in lockstep
+# with that decision.
+[graph]
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+# ----------------------------------------------------------------------------
+# Security advisories
+# ----------------------------------------------------------------------------
+[advisories]
+# Pull from the canonical RustSec advisory database.
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+
+# Default to denying everything; the per-advisory `ignore` array is the
+# explicit, reviewable escape hatch.
+version = 2
+yanked = "deny"
+ignore = [
+    # Each entry: ID, why we're accepting it, and an expiry that forces
+    # re-review. Expiry is enforced by CI: an expired entry must fail the
+    # run, not silently continue.
+    #
+    # ---- Cleanup history (kept as a comment so future operators see
+    #      what was already retired and don't accidentally re-add) ----
+    #
+    # Phase 1.7 (2026-05-14):
+    #   - RUSTSEC-2025-0119 (number_prefix): retired by `indicatif 0.17 -> 0.18.4`.
+    #   - RUSTSEC-2024-{0413,0416,0412,0418,0415,0420,0419,0370}: the entire
+    #     gtk-rs GTK3 chain. Retired by adding [graph].targets restriction
+    #     to Windows triples only -- the Linux-target chain is invisible
+    #     to our release pipeline and cannot reach a published artifact.
+    #     Add Linux back to [graph].targets and these will re-appear.
+    #   - RUSTSEC-2024-0388 (derivative): same retirement mechanism --
+    #     pulled only through accesskit_unix, which is target-cfg-gated
+    #     to non-Windows.
+    #   - RUSTSEC-2024-0384 (instant): same as derivative.
+    #
+    # ---- Still active (2 advisories, both gated by eframe 0.24) ----
+    # The Windows dep tree still pulls these because eframe 0.24 is pinned
+    # to winit 0.28, and the egui/accesskit chain still uses `instant` and
+    # `paste`. The eframe 0.24 -> 0.34 upgrade is a multi-file UI migration
+    # (egui's App trait return type, ViewportBuilder, widget API breaks
+    # across ~700 lines of mkpe_desktop). `paste` has a SECOND path through
+    # slint's image -> rav1e build chain that no eframe bump alone retires.
+    # Both crates affect mkpe_desktop and mkpe_ui (dev tools), NOT the
+    # released mkpe.exe -- Phase 2 ships only the CLI binary.
+
+    { id = "RUSTSEC-2024-0384", reason = "EXPIRES 2026-11-14. instant: unmaintained, transitive via eframe 0.24 -> winit 0.28 (on every target, not just Linux). Cleared by eframe 0.27+ migration. Phase 1.7 deferred -- affects mkpe_desktop dev tool only, not the released mkpe.exe." },
+    { id = "RUSTSEC-2024-0436", reason = "EXPIRES 2026-11-14. paste: unmaintained but functionally complete. Two paths to Windows tree: (1) eframe->accesskit_windows->paste, (2) slint 1.16 build dep -> image -> rav1e -> paste. Retirement requires eframe 0.27+ migration AND either slint upgrade or image default-feature override. Both deferred to a focused phase; affects mkpe_desktop and mkpe_ui (dev tools), NOT the released mkpe.exe." },
+]
+
+# ----------------------------------------------------------------------------
+# License policy
+# ----------------------------------------------------------------------------
+[licenses]
+version = 2
+# Permissive licenses we accept across the dependency graph.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",      # MPL is file-level copyleft -- acceptable for libraries
+    "BSL-1.0",      # Boost Software License (clipboard-win, error-code)
+    "OFL-1.1",      # SIL Open Font License (epaint bundled fonts)
+    "NCSA",         # University of Illinois (libfuzzer-sys, dev-only)
+]
+confidence-threshold = 0.93
+
+# MKPE's own workspace crates carry the non-SPDX `Proprietary` license string.
+# `private.ignore = true` instructs cargo-deny to skip license checks for
+# crates that are NOT published to a registry (i.e. our workspace members).
+# This is the correct, audit-friendly way to handle in-tree proprietary code:
+# we declare it private rather than smuggling a fake SPDX identifier.
+private = { ignore = true, registries = [] }
+
+# ============================================================================
+# !!! LEGAL DECISION REQUIRED -- Slint dual-licensing !!!
+# ============================================================================
+# Slint ships under: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0
+#                                 OR LicenseRef-Slint-Software-3.0
+#
+# MKPE is `Proprietary`. Picking GPL-3.0 contaminates MKPE with GPL. The
+# Royalty-free 2.0 license permits commercial use BUT has revenue thresholds
+# (currently USD 1M/year as of 2026) and prohibits SaaS distribution. The
+# Software 3.0 is a paid commercial license from SixtyFPS GmbH.
+#
+# The exceptions below tell cargo-deny we are choosing the Royalty-Free 2.0
+# option. This MUST be reviewed by counsel and confirmed against current
+# Slint terms before MKPE v1.1 is published. Tracking: docs/SLSA_PLAN.md
+# "Open Decisions" section.
+#
+# If VyreVault exceeds the revenue threshold OR wants SaaS distribution,
+# upgrade to a Slint commercial license and update these blocks accordingly.
+# If neither path is viable, drop the `ui` crate (Slint) and consolidate on
+# `ui_desktop` (egui, MIT-OR-Apache-2.0).
+# ============================================================================
+
+[[licenses.exceptions]]
+crate = "slint"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "slint-build"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "slint-macros"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-common"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-compiler"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-core"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-core-macros"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-backend-selector"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-backend-winit"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-renderer-femtovg"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-renderer-skia"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-renderer-software"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+# Ubuntu Font License -- applies to the Ubuntu font bundled in epaint
+# (egui's painter). The font file is licensed under UFL-1.0; the Rust code
+# itself is MIT OR Apache-2.0. Accepting UFL-1.0 for the font is uncontroversial
+# (it permits redistribution including in commercial software).
+[[licenses.exceptions]]
+crate = "epaint"
+allow = ["LicenseRef-UFL-1.0"]
+
+# Crates with unclear or missing license metadata that we have manually
+# verified. Format: { crate = "name@version", expression = "MIT" }
+[[licenses.clarify]]
+crate = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 },
+]
+
+# ----------------------------------------------------------------------------
+# Banned / required dependencies
+# ----------------------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+workspace-default-features = "allow"
+external-default-features = "allow"
+
+# Crates we never want, with rationale.
+deny = [
+    # Cryptographic crates with known issues
+    { crate = "openssl", reason = "Prefer rustls; OpenSSL is a perpetual CVE source." },
+    { crate = "openssl-sys", reason = "Pulled by openssl; same reason." },
+    # Time crates with soundness history
+    { crate = "time:<0.2.23", reason = "RUSTSEC-2020-0071 (segfault on macOS); ancient." },
+    # Async runtimes we don't use -- if one appears it's a transitive surprise
+    # worth investigating before allowing.
+]
+
+# Skip duplicates we have actively accepted (with reason). Empty for now --
+# we want to see the duplicates the first time cargo-deny runs.
+skip = []
+skip-tree = []
+
+# ----------------------------------------------------------------------------
+# Source registry policy
+# ----------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

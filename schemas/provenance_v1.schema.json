@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vyrevault.studio/mkpe/schemas/provenance_v1.schema.json",
+  "title": "MKPE Build Provenance v1",
+  "description": "JSON Schema for MKPE build attestations. The envelope is an in-toto Statement v1; the predicate is SLSA Provenance v1.0. MKPE-specific build metadata lives under buildDefinition.externalParameters and runDetails.byproducts.",
+  "type": "object",
+  "required": ["_type", "subject", "predicateType", "predicate"],
+  "additionalProperties": false,
+  "properties": {
+    "_type": {
+      "const": "https://in-toto.io/Statement/v1",
+      "description": "Marks this document as an in-toto Statement v1 envelope."
+    },
+    "subject": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The artifacts this attestation makes claims about. Each entry pairs a human-readable name with a content digest.",
+      "items": {
+        "type": "object",
+        "required": ["name", "digest"],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Distribution-relative filename, e.g. 'mkpe-1.0.0-x86_64-pc-windows-msvc.zip'."
+          },
+          "digest": {
+            "type": "object",
+            "description": "Map of hash algorithm to lowercase hex digest. SHA-256 is mandatory; additional algorithms are allowed.",
+            "required": ["sha256"],
+            "properties": {
+              "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "sha512": { "type": "string", "pattern": "^[0-9a-f]{128}$" },
+              "blake2b": { "type": "string", "pattern": "^[0-9a-f]{128}$" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    "predicateType": {
+      "const": "https://slsa.dev/provenance/v1",
+      "description": "SLSA Provenance v1.0. This is the only predicate type MKPE produces; consumers must reject unknown predicate types."
+    },
+    "predicate": {
+      "$ref": "#/$defs/slsaProvenanceV1"
+    }
+  },
+  "$defs": {
+    "slsaProvenanceV1": {
+      "type": "object",
+      "required": ["buildDefinition", "runDetails"],
+      "additionalProperties": false,
+      "properties": {
+        "buildDefinition": { "$ref": "#/$defs/buildDefinition" },
+        "runDetails":      { "$ref": "#/$defs/runDetails" }
+      }
+    },
+    "buildDefinition": {
+      "type": "object",
+      "description": "What was built and how, independent of the build run.",
+      "required": ["buildType", "externalParameters", "internalParameters", "resolvedDependencies"],
+      "additionalProperties": false,
+      "properties": {
+        "buildType": {
+          "const": "https://github.com/VyreVault/mkpe/build/v1",
+          "description": "MKPE's stable buildType URI. Bumping this URI is a breaking change to verifiers and requires a coordinated rollout."
+        },
+        "externalParameters": {
+          "type": "object",
+          "description": "Inputs the user controls (source ref, target triple). Anything in this object must come from outside the build environment.",
+          "required": ["source", "ref", "target", "profile", "workflow"],
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string",
+              "format": "uri",
+              "description": "Canonical source URI, e.g. 'git+https://github.com/VyreVault/mkpe@<sha>'."
+            },
+            "ref": {
+              "type": "string",
+              "description": "Git ref being built, e.g. 'refs/tags/v1.1.0'. Must match the tag-only release workflow trigger."
+            },
+            "target": {
+              "type": "string",
+              "enum": [
+                "x86_64-pc-windows-msvc",
+                "aarch64-pc-windows-msvc",
+                "x86_64-unknown-linux-gnu",
+                "aarch64-apple-darwin"
+              ]
+            },
+            "profile": {
+              "type": "string",
+              "enum": ["dist", "release"],
+              "description": "Cargo profile used. Release artifacts must use 'dist'."
+            },
+            "workflow": {
+              "type": "object",
+              "required": ["path", "ref"],
+              "additionalProperties": false,
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "const": ".github/workflows/release.yml"
+                },
+                "ref": {
+                  "type": "string",
+                  "description": "Workflow file's commit SHA at build time."
+                }
+              }
+            }
+          }
+        },
+        "internalParameters": {
+          "type": "object",
+          "description": "Inputs the builder controls (runner image, toolchain version, cross-compile config). These are evidence, not user inputs.",
+          "required": ["rustToolchain", "runner", "crossCompiler"],
+          "additionalProperties": true,
+          "properties": {
+            "rustToolchain": {
+              "type": "object",
+              "required": ["channel", "host"],
+              "properties": {
+                "channel":      { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+                "host":         { "type": "string" },
+                "rustcCommit":  { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+              }
+            },
+            "runner": {
+              "type": "object",
+              "required": ["os", "arch", "image"],
+              "properties": {
+                "os":    { "type": "string" },
+                "arch":  { "type": "string" },
+                "image": { "type": "string", "description": "Runner image identifier, e.g. 'ubuntu-24.04@sha256:...'." }
+              }
+            },
+            "crossCompiler": {
+              "type": "object",
+              "description": "Present only when building Windows artifacts from a Linux runner via cargo-xwin.",
+              "properties": {
+                "tool":          { "const": "cargo-xwin" },
+                "toolVersion":   { "type": "string" },
+                "msvcSdkSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+                "clangVersion":  { "type": "string" }
+              }
+            }
+          }
+        },
+        "resolvedDependencies": {
+          "type": "array",
+          "description": "Pinned dependency closure. Should mirror Cargo.lock exactly.",
+          "items": {
+            "type": "object",
+            "required": ["uri", "digest"],
+            "additionalProperties": false,
+            "properties": {
+              "uri":    { "type": "string", "format": "uri" },
+              "digest": {
+                "type": "object",
+                "properties": { "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } },
+                "required": ["sha256"]
+              },
+              "name":    { "type": "string" },
+              "version": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "runDetails": {
+      "type": "object",
+      "description": "How this specific build executed -- the per-run evidence.",
+      "required": ["builder", "metadata"],
+      "additionalProperties": false,
+      "properties": {
+        "builder": {
+          "type": "object",
+          "required": ["id"],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "format": "uri",
+              "description": "Globally unique builder identity. For Sigstore-keyless: the workflow identity URI (e.g. 'https://github.com/VyreVault/mkpe/.github/workflows/release.yml@refs/tags/v1.1.0'). This is the L3 trust anchor."
+            },
+            "version": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            },
+            "builderDependencies": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/buildDefinition/properties/resolvedDependencies/items" }
+            }
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "required": ["invocationId", "startedOn", "finishedOn"],
+          "additionalProperties": false,
+          "properties": {
+            "invocationId": {
+              "type": "string",
+              "format": "uri",
+              "description": "Specific CI run URL, e.g. 'https://github.com/VyreVault/mkpe/actions/runs/<id>/attempts/<n>'."
+            },
+            "startedOn":  { "type": "string", "format": "date-time" },
+            "finishedOn": { "type": "string", "format": "date-time" }
+          }
+        },
+        "byproducts": {
+          "type": "array",
+          "description": "Secondary outputs (SBOMs, diffoscope reports, build logs). Each byproduct is itself an addressable, signed object.",
+          "items": {
+            "type": "object",
+            "required": ["name", "uri", "digest"],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "enum": [
+                  "cyclonedx-sbom",
+                  "diffoscope-report",
+                  "build-log",
+                  "cargo-deny-report",
+                  "cargo-vet-report"
+                ]
+              },
+              "uri":    { "type": "string", "format": "uri" },
+              "digest": {
+                "type": "object",
+                "required": ["sha256"],
+                "properties": { "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -42,4 +42,8 @@ base64 = "0.21"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+# CLI integration testing. `assert_cmd` runs the binary in a subprocess;
+# `predicates` provides matchers; `tempfile` gives us isolated dirs per test.
+assert_cmd = "2"
+predicates = "3"
 tempfile = "3"
