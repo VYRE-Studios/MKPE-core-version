@@ -130,8 +130,8 @@ Layer 1: Core Engine
 Layer 2: Integration and Monitoring
   CLI workflows, watched-folder service, audit logs, policy enforcement
 
-Layer 3: Build Attestation
-  Signed build metadata and subject hash verification
+Layer 3: Build attestation + SLSA provenance
+  Signed build metadata (`mkpe attest …`) and DSSE-wrapped SLSA Provenance v1.0 (`mkpe verify-attestation` / `mkpe build-attestation`)
 
 Layer 4: Embedded DNA Tags
   Planned steganographic and format-specific embedded proof fingerprints
@@ -139,14 +139,50 @@ Layer 4: Embedded DNA Tags
 
 ## Repository Layout
 
-- `core/` - Rust provenance engine, proof bundles, manifests, archive loading, artifact verification.
+- `Cargo.toml` / `Cargo.lock` - Workspace root (six members; one lockfile for the whole graph).
+- `rust-toolchain.toml` - Pinned Rust toolchain for reproducible builds.
+- `deny.toml` / `supply-chain/` - `cargo-deny` and `cargo-vet` policy and audit ledger.
+- `schemas/` - JSON Schema for SLSA provenance payloads (compile-time embedded in `core`).
+- `.github/workflows/` - CI and release automation (see `release.yml` header for maturity).
+- `core/` - Rust provenance engine, proof bundles, manifests, archive loading, artifact verification, SLSA `provenance` module.
 - `cli/` - `mkpe` command-line interface.
 - `service/` - Windows watched-folder integrity service.
+- `ui/` - Shared UI primitives (Slint).
 - `ui_desktop/` - Desktop protection dashboard.
 - `ui_tray/` - System tray status app.
-- `docs/` - Format, architecture, and integration documentation.
+- `docs/` - Format, architecture, integration, **[release history](docs/RELEASES.md)**, and **[SLSA roadmap](docs/SLSA_PLAN.md)**.
 - `attestation/` - Build attestation layer ✅ (implemented in `core/src/attestation.rs`)
 - `stego/` - Planned embedded proof/steganography layer.
+
+## Versioning and releases
+
+- Crate versions use the `*-mkpe` suffix in each `Cargo.toml` (for example **`1.2.0-mkpe`** on `core` and `cli` today).
+- **[GitHub Releases](https://github.com/VYRE-Studios/MKPE-core-version/releases)** — the latest **git tag** is currently **`v1.1.0`**. **`main`** includes newer work (SLSA pipeline, workspace layout, dependency bumps). See **[docs/RELEASES.md](docs/RELEASES.md)** for what is on `main` since that tag and how to cut **`v1.2.0`**.
+
+## Build from source (workspace)
+
+From the repository root:
+
+```powershell
+cargo build --workspace --locked
+```
+
+The workspace enables optional **TPM / YubiKey** features in `core` that may not compile on every host OS. For a minimal library check: `cargo check -p morse_kirby_core --no-default-features`. Release-style Windows binaries are built from Linux CI using **`cargo-xwin`** (see `docs/SLSA_PLAN.md` and `.github/workflows/release.yml`).
+
+## SLSA build provenance (DSSE)
+
+MKPE emits and verifies **SLSA Build Provenance v1.0** inside **DSSE** envelopes (in-toto v1), with schema validation from `schemas/provenance_v1.schema.json`. Roadmap and trust decisions: **`docs/SLSA_PLAN.md`**.
+
+```powershell
+mkpe verify-attestation --pubkey .\keys\mkpe_public.key --artifact .\mkpe.exe .\mkpe.exe.intoto.jsonl
+mkpe build-attestation --artifact .\mkpe.exe --lockfile .\Cargo.lock --context .\build-context.json --key .\keys\mkpe_private.key --output .\mkpe.exe.intoto.jsonl
+```
+
+Pre-SLSA unsigned `build_attestation.json` files: `mkpe verify-attestation --legacy …` (exit **6**, informational only).
+
+## Security disclosures
+
+See **[SECURITY.md](SECURITY.md)** for how to report vulnerabilities.
 
 ## Security Model
 

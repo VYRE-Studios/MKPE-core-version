@@ -1,17 +1,17 @@
 # Morse-Kirby Provenance Engine (MKPE) – Integration & Usage Guide
 
-**Version**: v1.0.0-mkpe  
-**Manifest ID**: `6260a764-7901-4997-9a85-898d728e760d`  
-**Root Hash**: `9b5041f701ba5279...`
+**Document version**: v1.2.0-mkpe (update the frozen manifest fields below when you re-freeze a canonical bundle).  
+**Example manifest ID** (historical v1.0.0 freeze): `6260a764-7901-4997-9a85-898d728e760d`  
+**Example root hash** (truncated): `9b5041f701ba5279...`
 
-This guide defines how MKPE must be integrated and used by all host applications.
+This guide defines how MKPE must be integrated and used by all host applications. Values shown for manifest ID / root hash are **examples from an earlier frozen build**; replace them with the IDs from **your** pinned `mkpe_core_*.mkpe` when you adopt a new baseline.
 
 ---
 
 ## Core Ideas
 
 - **`.mkpe`** = binary-JSON hybrid bundle proving origin and integrity
-- **Canonical Engine** (`v1.0.0-mkpe`) is frozen; all later versions must reference it
+- **Canonical Engine** — pin a specific `*-mkpe` release in your integration tests; the examples in this document used **`v1.0.0-mkpe`** as the frozen baseline
 - Every artifact that claims provenance must be signed through the engine's API or CLI
 - **Core Principle**: *"Every verified object carries its own truth."*
 

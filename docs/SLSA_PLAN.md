@@ -22,7 +22,7 @@ Captured here so future sessions don't re-litigate them:
 | Workspace layout | Single `Cargo.toml` at repo root, 6 members | 2026-05-14 | One lockfile, one SBOM, one audit surface. |
 | Toolchain pin | `1.93.1` via `rust-toolchain.toml` | 2026-05-14 | Matches current dev workstation; bump policy documented in the file itself. |
 | Supply-chain audit baseline | `cargo-vet init` w/ 867 exemptions; new deps must be audited | 2026-05-14 | Grandfathers existing tree; raises the bar for everything added going forward. |
-| Key custody (release) | TBD -- choice deferred to Phase 2 kickoff | -- | Sigstore keyless is the recommendation; pending operator sign-off. |
+| Key custody (release) | Sigstore Keyless via GitHub Actions OIDC + Fulcio + Rekor | 2026-05-14 | Locked with builder identity row below; same decision stated once in the table for searchability. |
 | Key custody (content) | DPAPI (default) or CNG+TPM (regulated) | 2026-05-14 | Per-user, machine-bound; TPM upgrade path documented in KEY_ROTATION.md. |
 | Slint licensing | Royalty-Free 2.0 option (LicenseRef-Slint-Royalty-free-2.0) | 2026-05-14 | VyreVault Studios is under the USD-1M-revenue threshold and has no SaaS-distribution plans for MKPE. `deny.toml` exceptions are configured to this option. Revisit if revenue model changes; failure mode is upgrading to Slint Software 3.0 commercial license. |
 | Phase 1.5 scope | in-toto producer + `mkpe verify-attestation` subcommand | 2026-05-14 | Shipped. 20 tests across `core` and `mkpe` cover sign/verify, schema-match, tamper, DSSE PAE conformance, and CLI exit-code contract. Producer swap (legacy `build_attestation.json` -> new envelope) deferred to Phase 1.6. |
