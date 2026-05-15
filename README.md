@@ -157,7 +157,7 @@ Layer 4: Embedded DNA Tags
 ## Versioning and releases
 
 - Crate versions use the `*-mkpe` suffix in each `Cargo.toml` (for example **`1.2.0-mkpe`** on `core` and `cli` today).
-- **[GitHub Releases](https://github.com/VYRE-Studios/MKPE-core-version/releases)** — the latest **git tag** is currently **`v1.1.0`**. **`main`** includes newer work (SLSA pipeline, workspace layout, dependency bumps). See **[docs/RELEASES.md](docs/RELEASES.md)** for what is on `main` since that tag and how to cut **`v1.2.0`**.
+- **[GitHub Releases](https://github.com/VYRE-Studios/MKPE-core-version/releases)** — latest **git tag** is **`v1.2.0`**. Use **compare** `v1.1.0...v1.2.0` on GitHub to review only that release delta (not the whole repo since the first commit). Details: **[docs/RELEASES.md](docs/RELEASES.md)** (including what SLSA **L3** pieces are still on the roadmap).
 
 ## Build from source (workspace)
 
