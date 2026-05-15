@@ -446,8 +446,8 @@ Scope sketch (will be refined when the phase opens):
 
 ### Phase 2.3 -- CI hardening
 
-Status: **In progress.** Hardens `release.yml` around the Phase 2.2
-cosign-keyless path: deterministic crate fetch, real MSVC SDK
+Status: **Complete (shipped 2026-05-14).** Hardens `release.yml` around the
+Phase 2.2 cosign-keyless path: deterministic crate fetch, real MSVC SDK
 materialization hashing, runner image identity in `BuildContextSpec`,
 a two-runner canonical-statement gate, and `--git-dep-digests` wiring
 (empty `{}` until the workspace lockfile carries git sources).
@@ -484,22 +484,31 @@ Still open within 2.3 / follow-ups:
 
 ### Phase 2.4 -- Verification UX + final polish
 
-Status: **Pending.** Closes Phase 2 with the user-facing
-verification documentation and a final compatibility smoke against
-`slsa-verifier`.
+Status: **Complete (2026-05-14).** Closes Phase 2 with user-facing verification
+docs, a CI smoke that recomputes DSSE PAE and runs **`cosign verify-blob`**
+against the published bundle (upstream Sigstore CLI, same bytes `mkpe` uses),
+and a `KEY_ROTATION.md` pass for keyless release identity.
 
-Scope:
+Shipped:
 
-- `docs/VERIFY.md` showing how a downstream user verifies an MKPE
-  release using `slsa-verifier verify-artifact` and
-  `cosign verify-attestation`.
-- A CI integration test that builds a release attestation, then
-  invokes `slsa-verifier` against it in a separate job. Catches
-  any drift between our SLSA Provenance v1.0 shape and the
-  upstream verifier's expectations.
-- Final pass on `KEY_ROTATION.md` to describe what "rotation" means
-  in a keyless world (it doesn't, in the traditional sense; what
-  rotates is the workflow ref binding).
+- [x] [`docs/VERIFY.md`](VERIFY.md) -- supported paths: `mkpe verify-attestation`,
+      **`cosign verify-blob`** on DSSE PAE; **honest limitation** of
+      `slsa-verifier verify-artifact` (curated builder ID + `buildType` allowlist;
+      MKPE’s first-party workflow + custom `buildType` are not registered
+      upstream today).
+- [x] `release.yml` job **`cosign-dsse-external-verify`** -- checks out the
+      requested ref, downloads the Phase 2.3 bundle, runs
+      `scripts/ci/verify_cosign_dsse_bundle.sh` after `cosign-installer`.
+- [x] [`docs/security/KEY_ROTATION.md`](security/KEY_ROTATION.md) -- subsection
+      *What “rotation” means for keyless release signing* (workflow ref
+      binding, policy moves, Sigstore roots, incident response vs keypair
+      rotation).
+
+Deferred / not applicable:
+
+- [ ] `slsa-verifier verify-artifact` in CI until MKPE adopts a registered
+      `buildType` + builder tuple or upstream extends registration; see
+      `docs/VERIFY.md`.
 
 ---
 

@@ -137,6 +137,34 @@ If political/legal constraints later require a self-managed release key,
 generate it inside an HSM (YubiHSM 2, AWS CloudHSM, GCP Cloud KMS w/ HSM-backed
 keyring) -- never on a general-purpose machine -- and rotate annually.
 
+#### What “rotation” means for keyless release signing
+
+There is **no long-lived private key** to rotate in the traditional sense. The
+cryptographic identity is a **short-lived Fulcio certificate** minted per build
+from the GitHub Actions OIDC token. What you maintain instead:
+
+1. **Workflow ref binding.** Trust is anchored in the workflow path and ref
+   embedded in the certificate (for example
+   `https://github.com/<org>/<repo>/.github/workflows/release.yml@refs/tags/vX.Y.Z`).
+   Verifiers must pin an acceptable ref (tags for production; `main` only if
+   you explicitly accept that policy risk).
+
+2. **Policy updates when the workflow moves.** If you rename the workflow file,
+   split jobs, or change the OIDC `builder_id` string you embed in
+   `build_context.json`, downstream verification policies (`mkpe
+   verify-attestation --certificate-identity`, `cosign verify-blob`, etc.) must
+   move in lockstep.
+
+3. **Fulcio / Sigstore / Rekor roots.** Public-good Sigstore rotates trust
+   material on its own schedule; `cosign` / `mkpe` consume TUF roots bundled
+   with the tooling. Keep release CI images and developer CLIs on supported
+   versions so root updates do not strand verification.
+
+4. **Incident response.** If a workflow or repository is compromised, you
+   revoke trust by **yanking tags**, **disabling the workflow**, and
+   **publishing an advisory** that lists affected artifact digests -- not by
+   rotating a static Ed25519 keypair tied to the builder.
+
 ### Root Identity
 
 Generate on an air-gapped machine, on hardware tokens:

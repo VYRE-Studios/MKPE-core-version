@@ -1,11 +1,11 @@
-# MKPE Release Workflow -- Phase 2.3 CI hardening (Sigstore keyless + reproducibility)
+# MKPE Release Workflow -- Phase 2.3 CI hardening + Phase 2.4 verification smoke
 #
 # WHAT THIS WORKFLOW DOES
 # ------------------------
 # 1. Builds MKPE on a GitHub-hosted Ubuntu runner.
 # 2. Cross-compiles to `x86_64-pc-windows-msvc` via `cargo-xwin`.
-# 3. Records runner image identity and a composite SHA-256 over MSVC SDK
-#    payloads in the xwin cache (replaces Phase 1.6 placeholders).
+# 3. Cross-compiles Windows artifacts via `cargo-xwin`, then records runner image
+#    identity and a composite SHA-256 over MSVC SDK payloads in the xwin cache.
 # 4. Composes `BuildContextSpec` JSON from GitHub Actions context.
 # 5. Installs cosign and invokes `mkpe build-attestation --sign-backend cosign-keyless`
 #    with `--git-dep-digests` (empty `{}` when the workspace lockfile has no git deps).
@@ -13,12 +13,15 @@
 #    `builder_id` in the same context JSON.
 # 7. Two fresh runners re-emit `--statement-only` canonical statements from the
 #    staged bundle and a compare step fails on byte mismatch.
-# 8. Uploads artifact bundle + envelope as workflow artifacts.
+# 8. Recomputes DSSE PAE for the published envelope and runs `cosign verify-blob`
+#    (Phase 2.4 external smoke; see docs/VERIFY.md).
+# 9. Uploads artifact bundle + envelope as workflow artifacts.
 #
 # WHAT THIS WORKFLOW DOES NOT YET DO (deferred to later phases)
 # --------------------------------------------------------------
 # - Publishing to a GitHub Release page / Rekor policy tuning beyond cosign defaults.
-# - `slsa-verifier` compatibility smoke (Phase 2.4).
+# - `slsa-verifier verify-artifact` in CI (not applicable until MKPE uses a
+#   builder/buildType tuple registered in slsa-verifier; see docs/VERIFY.md).
 #
 # DO NOT CONFUSE THIS WITH A COMPLETE SLSA L3 CLAIM. The envelope format is
 # L3-compatible; remaining gaps are documented in docs/SLSA_PLAN.md.
@@ -349,3 +352,29 @@ jobs:
           set -euo pipefail
           cmp -s stmts/statement-a.json stmts/statement-b.json
           echo "Canonical statements match across two runners."
+
+  cosign-dsse-external-verify:
+    name: Cosign CLI verify DSSE PAE (Phase 2.4)
+    needs: [build-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout (for scripts/ci helper)
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 1
+
+      - name: Download release bundle
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ needs.build-windows.outputs.bundle_artifact }}
+          path: bundle/
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
+
+      - name: Verify DSSE PAE with upstream cosign
+        shell: bash
+        run: bash scripts/ci/verify_cosign_dsse_bundle.sh bundle

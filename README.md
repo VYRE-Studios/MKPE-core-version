@@ -171,7 +171,7 @@ The workspace enables optional **TPM / YubiKey** features in `core` that may not
 
 ## SLSA build provenance (DSSE)
 
-MKPE emits and verifies **SLSA Build Provenance v1.0** inside **DSSE** envelopes (in-toto v1), with schema validation from `schemas/provenance_v1.schema.json`. Roadmap and trust decisions: **`docs/SLSA_PLAN.md`**.
+MKPE emits and verifies **SLSA Build Provenance v1.0** inside **DSSE** envelopes (in-toto v1), with schema validation from `schemas/provenance_v1.schema.json`. Roadmap and trust decisions: **`docs/SLSA_PLAN.md`**. Operator verification (`mkpe verify-attestation`, `cosign verify-blob`, and `slsa-verifier` expectations): **`docs/VERIFY.md`**.
 
 ```powershell
 mkpe verify-attestation --pubkey .\keys\mkpe_public.key --artifact .\mkpe.exe .\mkpe.exe.intoto.jsonl
