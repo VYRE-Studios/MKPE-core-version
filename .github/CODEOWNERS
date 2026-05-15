@@ -1,0 +1,61 @@
+# MKPE CODEOWNERS
+#
+# Rules in this file map paths to required reviewers. GitHub enforces them
+# via branch protection on `main` (configured in repo settings, not here).
+#
+# As of Phase 1 MKPE has a single maintainer. CODEOWNERS still serves as
+# documentation of which paths are security-sensitive so that any future
+# contributor or automated review knows where the bar is highest.
+#
+# Update policy:
+#   - Adding a reviewer to a path: routine PR, normal review.
+#   - Removing a reviewer from a security-sensitive path: requires the
+#     remaining owner of that path AND the security@vyrevault.studio
+#     contact to approve.
+#   - Adding new paths: include rationale in the commit message.
+
+# ----------------------------------------------------------------------------
+# Default: every change requires the maintainer's review.
+# ----------------------------------------------------------------------------
+* @RedWoodOG
+
+# ----------------------------------------------------------------------------
+# CRITICAL -- cryptographic primitives. Changes here invalidate every existing
+# attestation if done wrong. Require deep review even for trivial-looking diffs.
+# ----------------------------------------------------------------------------
+/core/src/crypto.rs        @RedWoodOG
+/core/src/manifest.rs      @RedWoodOG
+/core/src/proof.rs         @RedWoodOG
+/core/src/bundle.rs        @RedWoodOG
+/core/src/audit.rs         @RedWoodOG
+
+# ----------------------------------------------------------------------------
+# Supply-chain configuration. Loosening these is how silent compromise enters
+# a codebase. PR templates should call out any change to these files.
+# ----------------------------------------------------------------------------
+/Cargo.toml                @RedWoodOG
+/Cargo.lock                @RedWoodOG
+/rust-toolchain.toml       @RedWoodOG
+/deny.toml                 @RedWoodOG
+/supply-chain/             @RedWoodOG
+
+# ----------------------------------------------------------------------------
+# CI / build workflows. The workflow IS the SLSA trust anchor. A compromised
+# workflow file means every signed artifact afterward is suspect.
+# ----------------------------------------------------------------------------
+/.github/workflows/        @RedWoodOG
+/.github/CODEOWNERS        @RedWoodOG
+
+# ----------------------------------------------------------------------------
+# Provenance schemas and verifier surface. Format changes must keep backwards
+# compatibility with the entire history of issued attestations.
+# ----------------------------------------------------------------------------
+/schemas/                  @RedWoodOG
+/cli/src/verify*.rs        @RedWoodOG
+
+# ----------------------------------------------------------------------------
+# Security policy documents. Changes are governance acts, not code edits.
+# ----------------------------------------------------------------------------
+/SECURITY.md               @RedWoodOG
+/docs/security/            @RedWoodOG
+/docs/SLSA_PLAN.md         @RedWoodOG

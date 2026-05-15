@@ -1,0 +1,103 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "subject": [
+    {
+      "name": "mkpe-1.1.0-x86_64-pc-windows-msvc.zip",
+      "digest": {
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    }
+  ],
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://github.com/VyreVault/mkpe/build/v1",
+      "externalParameters": {
+        "source": "git+https://github.com/VyreVault/mkpe@1111111111111111111111111111111111111111",
+        "ref": "refs/tags/v1.1.0",
+        "target": "x86_64-pc-windows-msvc",
+        "profile": "dist",
+        "workflow": {
+          "path": ".github/workflows/release.yml",
+          "ref": "2222222222222222222222222222222222222222"
+        }
+      },
+      "internalParameters": {
+        "rustToolchain": {
+          "channel": "1.93.1",
+          "host": "x86_64-unknown-linux-gnu",
+          "rustcCommit": "3333333333333333333333333333333333333333"
+        },
+        "runner": {
+          "os": "ubuntu-24.04",
+          "arch": "x86_64",
+          "image": "ghcr.io/actions/runner-images/ubuntu-24.04@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "crossCompiler": {
+          "tool": "cargo-xwin",
+          "toolVersion": "0.18.0",
+          "msvcSdkSha256": "5555555555555555555555555555555555555555555555555555555555555555",
+          "clangVersion": "18.1.8"
+        }
+      },
+      "resolvedDependencies": [
+        {
+          "uri": "pkg:cargo/morse_kirby_core@1.0.0-mkpe",
+          "name": "morse_kirby_core",
+          "version": "1.0.0-mkpe",
+          "digest": {
+            "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+          }
+        },
+        {
+          "uri": "pkg:cargo/ed25519-dalek@2.2.0",
+          "name": "ed25519-dalek",
+          "version": "2.2.0",
+          "digest": {
+            "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+          }
+        }
+      ]
+    },
+    "runDetails": {
+      "builder": {
+        "id": "https://github.com/VyreVault/mkpe/.github/workflows/release.yml@refs/tags/v1.1.0",
+        "version": {
+          "cargo": "1.93.1",
+          "cargo-xwin": "0.18.0",
+          "cosign": "2.4.1",
+          "slsa-github-generator": "v2.0.0"
+        },
+        "builderDependencies": []
+      },
+      "metadata": {
+        "invocationId": "https://github.com/VyreVault/mkpe/actions/runs/99999999/attempts/1",
+        "startedOn": "2026-06-01T12:00:00Z",
+        "finishedOn": "2026-06-01T12:14:23Z"
+      },
+      "byproducts": [
+        {
+          "name": "cyclonedx-sbom",
+          "uri": "https://github.com/VyreVault/mkpe/releases/download/v1.1.0/mkpe-1.1.0.cdx.json",
+          "digest": {
+            "sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+          }
+        },
+        {
+          "name": "diffoscope-report",
+          "uri": "https://github.com/VyreVault/mkpe/releases/download/v1.1.0/mkpe-1.1.0.diffoscope.html",
+          "digest": {
+            "sha256": "9999999999999999999999999999999999999999999999999999999999999999"
+          }
+        },
+        {
+          "name": "cargo-deny-report",
+          "uri": "https://github.com/VyreVault/mkpe/releases/download/v1.1.0/mkpe-1.1.0.deny.json",
+          "digest": {
+            "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      ]
+    }
+  }
+}

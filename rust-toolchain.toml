@@ -1,0 +1,31 @@
+# Pinned Rust toolchain.
+#
+# Locking this to an exact patch version makes builds reproducible across
+# developer machines and CI runners. SLSA Build L3 requires deterministic
+# toolchain selection -- a floating `stable` channel breaks that guarantee
+# the moment upstream cuts a new release.
+#
+# Bump policy:
+#   - Patch bump (1.93.1 -> 1.93.2): on any security fix in the Rust standard
+#     library or compiler. Open a single-commit PR that cites the relevant
+#     CVE or RUSTSEC.
+#   - Minor bump (1.93 -> 1.94): scheduled with every Phase 2 release cycle.
+#     Run the full CI matrix + cargo-deny + cargo-vet before merging.
+#   - Major bump: not applicable until Rust 2.x.
+#
+# When bumping, also update:
+#   - `workspace.package.rust-version` in the root Cargo.toml
+#   - The expected toolchain string in any SLSA provenance fixtures
+#   - SBOM regeneration via tools/build-sbom.ps1
+
+[toolchain]
+channel = "1.93.1"
+profile = "minimal"
+components = [
+    "rustfmt",
+    "clippy",
+    "rust-src",
+]
+targets = [
+    "x86_64-pc-windows-msvc",
+]

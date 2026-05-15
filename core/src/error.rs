@@ -36,6 +36,15 @@ pub enum MkpeError {
 
     #[error("Hardware key error: {0}")]
     HardwareKeyError(String),
+
+    #[error("Provenance error: {0}")]
+    ProvenanceError(String),
+
+    #[error("Schema validation failed: {0}")]
+    SchemaValidation(String),
+
+    #[error("DSSE envelope error: {0}")]
+    DsseError(String),
 }
 
 pub type Result<T> = std::result::Result<T, MkpeError>;

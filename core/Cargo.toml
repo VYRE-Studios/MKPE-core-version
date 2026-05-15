@@ -44,6 +44,16 @@ challenge_response = { version = "0.5", optional = true }
 zeroize = { version = "1", features = ["zeroize_derive"] }
 hkdf = "0.12"
 
+# Provenance: JSON Schema validation against schemas/provenance_v1.schema.json.
+# Used to guarantee the producer never emits an attestation the verifier
+# can't validate. Draft 2020-12 support is required; jsonschema 0.18+ has it.
+jsonschema = { version = "0.18", default-features = false }
+
+# Provenance: parse Cargo.lock to populate resolvedDependencies[].digest.sha256
+# from the per-crate registry checksum. toml@0.8 has no_std-friendly parsing
+# and adds minimal closure (cargo's own dep tree already transitively pulls it).
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+
 [features]
 default = ["tpm", "yubikey"]
 tpm = ["tss-esapi"]

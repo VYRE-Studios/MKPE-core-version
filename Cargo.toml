@@ -1,0 +1,35 @@
+# Cargo workspace root for the MKPE codebase.
+#
+# Why a workspace?
+#   - one canonical Cargo.lock for the entire build closure, which is what
+#     SLSA Build Provenance attestations point at via `resolvedDependencies`
+#   - one `cargo deny check` invocation that covers every crate
+#   - one `cargo vet` audit graph
+#   - `cargo build --workspace` from the release workflow
+#
+# Crate ownership / layout:
+#   core/        morse_kirby_core   library, all cryptographic primitives
+#   cli/         mkpe               main CLI binary (signs/verifies/produces attestations)
+#   service/     mkpe_service       background service
+#   ui/          mkpe_ui            shared UI primitives
+#   ui_desktop/  mkpe_desktop       desktop UI (egui)
+#   ui_tray/     mkpe_tray          tray UI
+
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "cli",
+    "service",
+    "ui",
+    "ui_desktop",
+    "ui_tray",
+]
+
+# Crates the workspace knows about but does NOT build by default. None today,
+# but reserved so we can add experimental/dev tools later without forcing them
+# into every workspace-wide command.
+default-members = [
+    "core",
+    "cli",
+]
