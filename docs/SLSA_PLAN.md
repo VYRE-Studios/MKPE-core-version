@@ -446,32 +446,41 @@ Scope sketch (will be refined when the phase opens):
 
 ### Phase 2.3 -- CI hardening
 
-Status: **Pending.** Replaces the ephemeral-key scaffold in
-`release.yml` with real Sigstore signing, pins everything in the
-runner environment to content-addressed digests, adds the
-two-runner reproducibility check, and closes the deferred git-dep
-hashing gap.
+Status: **In progress.** Hardens `release.yml` around the Phase 2.2
+cosign-keyless path: deterministic crate fetch, real MSVC SDK
+materialization hashing, runner image identity in `BuildContextSpec`,
+a two-runner canonical-statement gate, and `--git-dep-digests` wiring
+(empty `{}` until the workspace lockfile carries git sources).
 
-Scope:
+Shipped in `release.yml`:
 
-- Install `cosign` (or wire the `sigstore` crate's runtime) in the
-  build job. Add `id-token: write` permission.
-- Replace the `mkpe keygen` + local-key signing block with a
-  `SigstoreKeylessSigner` invocation.
-- Pin `runs-on` to a digest, not a tag. GitHub publishes runner
-  images on `ghcr.io` with content-addressed digests since
-  ubuntu-24.04 GA; the workflow context JSON should record this.
-- Compute and record the real SHA-256 of the MSVC SDK bundle
-  `cargo-xwin` pulls, replacing the placeholder in `release.yml`.
-- Add a parallel matrix job that builds twice and byte-compares the
-  canonical statement bytes. Mismatch fails the workflow.
-- Add a `cargo fetch --locked` + deterministic tree-hash step for
-  any git source dependency, so the producer can populate
-  `resolvedDependencies` instead of emitting a warning. (Closes the
-  deferred Phase 1.7 item.)
-- Document branch-protection requirements for the workflow file's
-  ref; add a verification step that fails if the workflow ref isn't
-  `refs/heads/main` or a tag.
+- [x] `id-token: write` + cosign installer (inherited from Phase 2.2).
+- [x] Workflow ref gate: dispatch only from `refs/heads/main` or
+      `refs/tags/*` (`github.ref`), matching branch-protection intent.
+- [x] `cargo fetch --locked` before cross-build; host `mkpe` built with
+      `cargo build ... --locked` for a stable Linux CLI in the artifact bundle.
+- [x] `runner.image` from `RUNNER_IMAGE` when set, else
+      `ghcr.io/actions/runner-images/ubuntu-24.04:${ImageVersion}`.
+- [x] `cross_compiler.msvcSdkSha256`: composite SHA-256 over sorted
+      `*.tar.xz` / `*.cab` files under the xwin cache roots (including
+      `~/.cache/cargo-xwin/xwin`).
+- [x] `mkpe build-attestation` passes `--git-dep-digests` (currently
+      `{}` because `Cargo.lock` has no `git+` sources).
+- [x] Matrix replicas on fresh `ubuntu-24.04` runners run
+      `--statement-only` against a staged bundle; `cmp` fails the workflow
+      on mismatch.
+
+Still open within 2.3 / follow-ups:
+
+- [ ] Pin `runs-on` to a VMSS / GHCR digest label once the team picks a
+      stable runner pin policy (today: `ubuntu-24.04` label + rich `image`
+      string in context JSON).
+- [ ] When git-based crates appear in `Cargo.lock`, add a CI step that
+      emits a real URL→tree-SHA256 map (or fail closed) instead of an
+      empty JSON object.
+- [ ] Branch protection rules in GitHub settings (required reviews,
+      no direct pushes to `main`) -- documented operator procedure, not
+      enforceable from YAML alone.
 
 ### Phase 2.4 -- Verification UX + final polish
 

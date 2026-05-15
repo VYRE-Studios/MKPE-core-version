@@ -1,35 +1,31 @@
-# MKPE Release Workflow -- Phase 1.6 SCAFFOLD
+# MKPE Release Workflow -- Phase 2.3 CI hardening (Sigstore keyless + reproducibility)
 #
-# Status: Phase 1.6 (producer integrated, ephemeral key signing).
-# Target: SLSA Build Level 2-ish today; Phase 2 hardens this to L3.
-#
-# WHAT THIS WORKFLOW DOES TODAY (Phase 1.6)
-# -----------------------------------------
+# WHAT THIS WORKFLOW DOES
+# ------------------------
 # 1. Builds MKPE on a GitHub-hosted Ubuntu runner.
 # 2. Cross-compiles to `x86_64-pc-windows-msvc` via `cargo-xwin`.
-# 3. Generates an ephemeral ed25519 key inside the run.
-# 4. Composes a `BuildContextSpec` JSON from GitHub Actions context.
-# 5. Invokes `mkpe build-attestation` to emit a real, signed DSSE envelope.
-# 6. Uploads artifact + envelope + pubkey as workflow artifacts.
+# 3. Records runner image identity and a composite SHA-256 over MSVC SDK
+#    payloads in the xwin cache (replaces Phase 1.6 placeholders).
+# 4. Composes `BuildContextSpec` JSON from GitHub Actions context.
+# 5. Installs cosign and invokes `mkpe build-attestation --sign-backend cosign-keyless`
+#    with `--git-dep-digests` (empty `{}` when the workspace lockfile has no git deps).
+# 6. Self-verifies with `mkpe verify-attestation` + certificate identity matching
+#    `builder_id` in the same context JSON.
+# 7. Two fresh runners re-emit `--statement-only` canonical statements from the
+#    staged bundle and a compare step fails on byte mismatch.
+# 8. Uploads artifact bundle + envelope as workflow artifacts.
 #
-# WHAT THIS WORKFLOW DOES NOT YET DO (Phase 2 scope)
-# --------------------------------------------------
-# - Sigstore-keyless signing (Fulcio cert as `builder.id`). Today the
-#   `builder.id` is the workflow ref, not a verifiable identity certificate.
-# - Runner image SHA-256 pinning. GitHub-hosted runners change underneath
-#   us; SLSA L3 wants a content-addressed runner image.
-# - Reproducibility verification (build twice on two runners, byte-compare).
-# - Publishing to a release page / cosign attest / Rekor logging.
-# - Branch-protected workflow file (workflow ref pinning).
+# WHAT THIS WORKFLOW DOES NOT YET DO (deferred to later phases)
+# --------------------------------------------------------------
+# - Publishing to a GitHub Release page / Rekor policy tuning beyond cosign defaults.
+# - `slsa-verifier` compatibility smoke (Phase 2.4).
 #
-# DO NOT CONFUSE THIS WITH AN SLSA L3 WORKFLOW. The format of the
-# attestation is L3-compatible; the trust chain that produces it is not.
+# DO NOT CONFUSE THIS WITH A COMPLETE SLSA L3 CLAIM. The envelope format is
+# L3-compatible; remaining gaps are documented in docs/SLSA_PLAN.md.
 
 name: release
 
 on:
-  # Manual dispatch only until Phase 2 locks the trust chain. Auto-running
-  # this on push would imply L3-grade trust we don't yet have.
   workflow_dispatch:
     inputs:
       ref:
@@ -37,66 +33,85 @@ on:
         required: true
         type: string
 
-# Least-privilege defaults. Individual jobs opt into more if needed.
 permissions:
   contents: read
+  id-token: write
 
-# Cancel an in-flight run if a newer one starts for the same ref. Prevents
-# two builds racing to publish the same artifact.
 concurrency:
   group: release-${{ github.event.inputs.ref }}
   cancel-in-progress: true
 
 jobs:
   build-windows:
-    name: Build Windows x86_64 attestation (Phase 1.6 scaffold)
+    name: Build Windows x86_64 + cosign keyless attestation
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
-    # Surface to the user that this is not yet L3. Cosmetic but reinforces
-    # the README warning every time CI runs.
+    outputs:
+      bundle_artifact: ${{ steps.bundle_meta.outputs.artifact_name }}
+
     env:
-      MKPE_SLSA_LEVEL: "L2-scaffold (Phase 1.6)"
+      MKPE_SLSA_LEVEL: "L2-scaffold + Sigstore keyless + CI hardening (Phase 2.3)"
       TARGET: x86_64-pc-windows-msvc
       PROFILE: dist
 
     steps:
-      # SHA-pinned versions only. Tag-based references (`@v4`) are NOT
-      # tamper-evident -- a maintainer could move the tag. SHAs are
-      # content-addressed.
+      - name: Enforce workflow ref policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${{ github.ref }}"
+          case "$ref" in
+            refs/heads/main) ;;
+            refs/tags/*) ;;
+            *)
+              echo "This workflow must be started from refs/heads/main or a tag; got: $ref" >&2
+              exit 1
+              ;;
+          esac
+
       - name: Checkout sources
-        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332  # v4.1.7
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
         with:
           ref: ${{ github.event.inputs.ref }}
-          # `fetch-depth: 0` so we can resolve the exact commit SHA below.
           fetch-depth: 0
+
+      - name: Sanitize ref for artifact names (no slashes)
+        id: slug
+        shell: bash
+        run: |
+          r='${{ github.event.inputs.ref }}'
+          echo "artifact_slug=${r//\//-}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
 
       - name: Capture start time
         id: started
+        shell: bash
         run: |
           echo "ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-      # The toolchain version is pinned in rust-toolchain.toml; rustup
-      # honors it automatically. We re-print it here so the workflow log
-      # shows the resolved version next to its expected value.
       - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        shell: bash
         run: |
           rustup show active-toolchain
           rustup target add "$TARGET"
 
       - name: Install cargo-xwin
+        shell: bash
         run: cargo install cargo-xwin --version 0.18.0 --locked
 
-      # cargo-xwin needs LLVM. clang version is captured into the
-      # attestation as part of the cross-compiler evidence block.
       - name: Install LLVM
+        shell: bash
         run: |
           sudo apt-get update
           sudo apt-get install -y clang lld
 
       - name: Capture tool versions
         id: tools
+        shell: bash
         run: |
           echo "rustc_version=$(rustc -V)" >> "$GITHUB_OUTPUT"
           echo "rustc_host=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
@@ -105,33 +120,78 @@ jobs:
           echo "xwin_version=$(cargo xwin --version 2>&1 | head -1)" >> "$GITHUB_OUTPUT"
           echo "clang_version=$(clang --version | head -1)" >> "$GITHUB_OUTPUT"
 
-      - name: Build release artifacts
+      - name: Fetch crates (locked)
+        shell: bash
+        run: cargo fetch --locked
+
+      - name: Build release artifacts (cross)
+        shell: bash
         run: |
           cargo xwin build --release --target "$TARGET" \
             -p mkpe \
             -p morse_kirby_core
 
-      # Stage the artifact under a stable name. The subject digest in the
-      # attestation is the SHA-256 of *this* file, so its name and bytes
-      # are now load-bearing.
+      - name: Capture runner image identity
+        id: runner_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Prefer RUNNER_IMAGE when the runner exports a GHCR reference; otherwise
+          # bind to the runner-images build id (ImageVersion) published with the VM.
+          if [ -n "${RUNNER_IMAGE:-}" ]; then
+            RI="$RUNNER_IMAGE"
+          else
+            IV="${ImageVersion:-unknown}"
+            RI="ghcr.io/actions/runner-images/ubuntu-24.04:${IV}"
+          fi
+          echo "runner_image=$RI" >> "$GITHUB_OUTPUT"
+
+      - name: Compute MSVC SDK materialization digest (xwin cache)
+        id: msvc_sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+          MSVC_SDK_SHA256=""
+          CACHE_BASE="${XDG_CACHE_HOME:-$HOME/.cache}"
+          for root in \
+            "${XWIN_CACHE:-}" \
+            "${XWIN_CACHE_DIR:-}" \
+            "${CACHE_BASE}/cargo-xwin/xwin" \
+            "${CACHE_BASE}/xwin" \
+            "$HOME/.xwin-cache" \
+            "$HOME/.cache/xwin"
+          do
+            [ -n "$root" ] || continue
+            [ -d "$root" ] || continue
+            count="$(find "$root" -type f \( -name '*.tar.xz' -o -name '*.cab' \) 2>/dev/null | wc -l)"
+            [ "$count" -gt 0 ] || continue
+            MSVC_SDK_SHA256="$(find "$root" -type f \( -name '*.tar.xz' -o -name '*.cab' \) -print0 2>/dev/null \
+              | LC_ALL=C sort -z \
+              | xargs -0 -r sha256sum \
+              | sha256sum | awk '{print $1}')"
+            break
+          done
+          if [ -z "$MSVC_SDK_SHA256" ]; then
+            echo "Could not locate MSVC SDK payloads under xwin cache roots; inspect XWIN_CACHE / ~/.cache/cargo-xwin/xwin." >&2
+            exit 1
+          fi
+          echo "msvc_sdk_sha256=$MSVC_SDK_SHA256" >> "$GITHUB_OUTPUT"
+
       - name: Stage primary artifact
         id: stage
+        shell: bash
         run: |
           mkdir -p dist
           cp "target/$TARGET/release/mkpe.exe" "dist/mkpe-${{ github.event.inputs.ref }}-$TARGET.exe"
           echo "artifact_path=dist/mkpe-${{ github.event.inputs.ref }}-$TARGET.exe" >> "$GITHUB_OUTPUT"
           echo "artifact_name=mkpe-${{ github.event.inputs.ref }}-$TARGET.exe" >> "$GITHUB_OUTPUT"
 
-      # Phase 1.6: ephemeral key per run. This is NOT L3; Phase 2 swaps
-      # this for Sigstore-keyless. Until then the public key is published
-      # alongside the artifact so external verifiers can use it.
-      - name: Generate ephemeral signing key for this run
-        run: |
-          ./target/$TARGET/release/mkpe.exe keygen --output ./signing-keys \
-            || cargo run --release -p mkpe -- keygen --output ./signing-keys
-
       - name: Compose BuildContextSpec from GitHub context
         id: context
+        shell: bash
+        env:
+          RUNNER_IMAGE_PIN: ${{ steps.runner_meta.outputs.runner_image }}
+          MSVC_SDK_SHA256: ${{ steps.msvc_sdk.outputs.msvc_sdk_sha256 }}
         run: |
           cat > build_context.json <<EOF
           {
@@ -151,12 +211,12 @@ jobs:
             "runner": {
               "os": "ubuntu-24.04",
               "arch": "x86_64",
-              "image": "ghcr.io/actions/runner-images/ubuntu-24.04:unpinned-phase1.6"
+              "image": "$RUNNER_IMAGE_PIN"
             },
             "cross_compiler": {
               "tool": "cargo-xwin",
               "toolVersion": "0.18.0",
-              "msvcSdkSha256": "$(echo -n 'phase1.6-not-yet-pinned' | sha256sum | awk '{print $1}')",
+              "msvcSdkSha256": "$MSVC_SDK_SHA256",
               "clangVersion": "${{ steps.tools.outputs.clang_version }}"
             },
             "builder_id": "https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.event.inputs.ref }}",
@@ -172,37 +232,120 @@ jobs:
           EOF
           cat build_context.json
 
-      - name: Produce DSSE attestation
+      - name: Prepare empty git-dep digest map (extend when Cargo.lock gains git sources)
+        shell: bash
+        run: printf '%s\n' '{}' > git_dep_digests.json
+
+      - name: Build host mkpe CLI (Linux, for downstream reproducibility jobs)
+        shell: bash
+        run: cargo build --release -p mkpe --no-default-features --locked
+
+      - name: Produce DSSE attestation (Sigstore keyless)
+        shell: bash
         run: |
-          cargo run --release -p mkpe -- build-attestation \
+          ./target/release/mkpe build-attestation \
             --artifact "${{ steps.stage.outputs.artifact_path }}" \
             --lockfile Cargo.lock \
             --context build_context.json \
-            --key ./signing-keys/mkpe_private.key \
+            --git-dep-digests git_dep_digests.json \
+            --sign-backend cosign-keyless \
             --output "${{ steps.stage.outputs.artifact_path }}.intoto.jsonl"
 
-      # Self-check: the workflow must verify what it just produced before
-      # uploading. If this step fails, the attestation is broken; the run
-      # should not silently publish unverifiable artifacts.
       - name: Self-verify attestation
+        shell: bash
         run: |
-          cargo run --release -p mkpe -- verify-attestation \
+          BUILDER_ID="$(jq -r .builder_id build_context.json)"
+          ./target/release/mkpe verify-attestation \
             "${{ steps.stage.outputs.artifact_path }}.intoto.jsonl" \
-            --pubkey ./signing-keys/mkpe_public.key \
+            --certificate-identity "$BUILDER_ID" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --artifact "${{ steps.stage.outputs.artifact_path }}" \
             --json
 
-      # Phase 1.6: publish artifact + envelope + public key. The public
-      # key is a workflow artifact (not committed), so verifiers must
-      # trust the workflow run identity. Phase 2 swaps this for
-      # Sigstore-keyless where trust is rooted in Fulcio + Rekor.
-      - name: Upload artifact + attestation + pubkey
-        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+      - name: Assemble stable bundle for reproducibility + downloads
+        id: bundle_meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p bundle
+          cp "${{ steps.stage.outputs.artifact_path }}" bundle/mkpe.exe
+          cp "${{ steps.stage.outputs.artifact_path }}.intoto.jsonl" bundle/mkpe.exe.intoto.jsonl
+          cp build_context.json bundle/build_context.json
+          cp git_dep_digests.json bundle/git_dep_digests.json
+          cp Cargo.lock bundle/Cargo.lock
+          cp ./target/release/mkpe bundle/mkpe-host-cli
+          chmod +x bundle/mkpe-host-cli
+          ART_NAME="mkpe-release-bundle-${{ steps.slug.outputs.artifact_slug }}-${{ env.TARGET }}-phase2.3"
+          echo "artifact_name=$ART_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact bundle + attestation
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
-          name: mkpe-${{ github.event.inputs.ref }}-${{ env.TARGET }}-phase1.6
-          path: |
-            ${{ steps.stage.outputs.artifact_path }}
-            ${{ steps.stage.outputs.artifact_path }}.intoto.jsonl
-            ./signing-keys/mkpe_public.key
+          name: ${{ steps.bundle_meta.outputs.artifact_name }}
+          path: bundle/
           retention-days: 90
           if-no-files-found: error
+
+  canonical-statement-replica:
+    name: Canonical statement replica (${{ matrix.replica }})
+    needs: build-windows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: true
+      matrix:
+        replica: [a, b]
+
+    steps:
+      - name: Checkout sources (same tree as build)
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 1
+
+      - name: Download release bundle
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ needs.build-windows.outputs.bundle_artifact }}
+          path: bundle/
+
+      - name: Emit canonical statement only
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x bundle/mkpe-host-cli
+          bundle/mkpe-host-cli build-attestation \
+            --artifact bundle/mkpe.exe \
+            --lockfile bundle/Cargo.lock \
+            --context bundle/build_context.json \
+            --git-dep-digests bundle/git_dep_digests.json \
+            --statement-only "statement-${{ matrix.replica }}.json"
+
+      - name: Upload statement
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: canonical-statement-${{ matrix.replica }}
+          path: statement-${{ matrix.replica }}.json
+          retention-days: 14
+          if-no-files-found: error
+
+  compare-canonical-statements:
+    name: Compare canonical statements (two-runner gate)
+    needs: [canonical-statement-replica]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Download replica statements
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          pattern: canonical-statement-*
+          path: stmts/
+          merge-multiple: true
+
+      - name: Byte-compare canonical statements
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp -s stmts/statement-a.json stmts/statement-b.json
+          echo "Canonical statements match across two runners."

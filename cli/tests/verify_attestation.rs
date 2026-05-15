@@ -328,6 +328,33 @@ fn missing_pubkey_in_non_legacy_mode_is_a_clear_error() {
 }
 
 #[test]
+fn certificate_identity_without_sigstore_bundle_is_rejected() {
+    let f = build_signed_fixture();
+    let out = Command::cargo_bin("mkpe")
+        .unwrap()
+        .args([
+            "verify-attestation",
+            f.envelope_path.to_str().unwrap(),
+            "--certificate-identity",
+            "https://github.com/example/foo/.github/workflows/release.yml@refs/tags/v1.0.0",
+            "--pubkey",
+            &f.pubkey_b64,
+        ])
+        .output()
+        .expect("spawn");
+    assert!(
+        !out.status.success(),
+        "must reject --certificate-identity without a bundle"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no Sigstore bundle"),
+        "expected bundle mismatch hint, stderr={stderr}"
+    );
+    drop(f.tmpdir);
+}
+
+#[test]
 fn tampered_payload_exits_with_code_2_or_3() {
     let f = build_signed_fixture();
 

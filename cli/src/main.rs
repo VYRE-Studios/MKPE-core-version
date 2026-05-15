@@ -34,6 +34,15 @@ enum OutputFormat {
     Json,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+enum SignBackend {
+    /// Ed25519 using `--key` / `mkpe_public.key` (local and test default).
+    #[default]
+    Local,
+    /// Sigstore keyless via `cosign sign-blob` (ambient OIDC on GitHub Actions).
+    CosignKeyless,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Generate a new cryptographic keypair
@@ -169,14 +178,14 @@ enum Commands {
 	},
 
     /// Verify a SLSA build provenance attestation (DSSE-wrapped in-toto v1
-    /// Statement). Validates the DSSE envelope, checks the ed25519 signature
-    /// against the supplied public key, validates the Statement against
-    /// MKPE's JSON Schema, and optionally verifies that the subject digest
-    /// matches an artifact on disk.
+    /// Statement). For ed25519 envelopes, validates the signature against
+    /// `--pubkey`. For Sigstore keyless envelopes (with an embedded bundle),
+    /// delegates to `cosign verify-blob` with `--certificate-identity` /
+    /// `--certificate-oidc-issuer`.
     ///
     /// Exit codes (stable contract for CI consumers):
     ///   0  attestation valid (and artifact matches if --artifact supplied)
-    ///   2  signature invalid or wrong key
+    ///   2  signature invalid or wrong key / cosign policy mismatch
     ///   3  schema validation failed
     ///   4  artifact digest mismatch
     ///   5  malformed envelope (parse / base64 / payload type)
@@ -189,9 +198,20 @@ enum Commands {
         path: PathBuf,
 
         /// Base64-encoded ed25519 public key, OR a path to a file containing
-        /// one. Required for normal verification; optional with --legacy.
+        /// one. Required when the envelope has no Sigstore bundle; ignored when
+        /// a bundle is present (use `--certificate-identity` instead).
         #[arg(short = 'k', long)]
         pubkey: Option<String>,
+
+        /// Expected Fulcio certificate identity (e.g. SLSA `builder.id`).
+        /// Required when the attestation embeds a Sigstore bundle; ignored for
+        /// pure ed25519 envelopes.
+        #[arg(long)]
+        certificate_identity: Option<String>,
+
+        /// OIDC issuer URI for `cosign verify-blob --certificate-oidc-issuer`.
+        #[arg(long, default_value = "https://token.actions.githubusercontent.com")]
+        certificate_oidc_issuer: String,
 
         /// Optional artifact to cross-check. When supplied, the file's
         /// SHA-256 must match one of the subjects in the Statement.
@@ -237,15 +257,34 @@ enum Commands {
         #[arg(short = 'c', long)]
         context: PathBuf,
 
-        /// Private signing key file (base64-encoded 32-byte ed25519).
-        /// Must be paired with a `mkpe_public.key` alongside it.
-        #[arg(short = 'k', long)]
-        key: PathBuf,
+        /// How to sign the envelope. `cosign-keyless` requires `cosign` on
+        /// PATH and ambient OIDC (e.g. GitHub Actions with `id-token: write`).
+        #[arg(long, value_enum, default_value_t = SignBackend::Local)]
+        sign_backend: SignBackend,
 
-        /// Output path for the DSSE envelope. Convention:
-        /// `<artifact>.intoto.jsonl` or `<artifact>.attestation.json`.
+        /// Private signing key file (base64-encoded 32-byte ed25519).
+        /// Required when emitting `--output` with `--sign-backend local`;
+        /// must be paired with `mkpe_public.key` alongside it.
+        #[arg(short = 'k', long)]
+        key: Option<PathBuf>,
+
+        /// Output path for the DSSE envelope. Omit when using `--statement-only`
+        /// without signing.
         #[arg(short = 'o', long)]
-        output: PathBuf,
+        output: Option<PathBuf>,
+
+        /// Write the canonical in-toto Statement JSON (unsigned) to this path.
+        /// May be combined with `--output` to also emit a signed envelope.
+        /// When used **without** `--output`, no signing occurs (no `--key` /
+        /// cosign required).
+        #[arg(long)]
+        statement_only: Option<PathBuf>,
+
+        /// JSON map of `Cargo.lock` git `source` URL -> lowercase 64-hex
+        /// SHA-256 of the checked-out source tree (CI-generated after
+        /// `cargo fetch --locked`).
+        #[arg(long)]
+        git_dep_digests: Option<PathBuf>,
 
         /// Override the subject name in the attestation. Defaults to the
         /// artifact's file name. Useful when the build path differs from
@@ -597,12 +636,46 @@ fn main() -> Result<()> {
 		Commands::Audit { command } => audit_command(command, cli.format),
 		Commands::Multisig { command } => multisig_command(command, cli.format),
 		Commands::Ownership { command } => ownership_command(command, cli.format),
-        Commands::VerifyAttestation { path, pubkey, artifact, json, legacy } => {
-            verify_attestation_command(path, pubkey, artifact, json, legacy, cli.verbose)
-        }
-        Commands::BuildAttestation { artifact, lockfile, context, key, output, artifact_name } => {
-            build_attestation_command(artifact, lockfile, context, key, output, artifact_name, cli.verbose)
-        }
+        Commands::VerifyAttestation {
+            path,
+            pubkey,
+            certificate_identity,
+            certificate_oidc_issuer,
+            artifact,
+            json,
+            legacy,
+        } => verify_attestation_command(
+            path,
+            pubkey,
+            certificate_identity,
+            certificate_oidc_issuer,
+            artifact,
+            json,
+            legacy,
+            cli.verbose,
+        ),
+        Commands::BuildAttestation {
+            artifact,
+            lockfile,
+            context,
+            sign_backend,
+            key,
+            output,
+            statement_only,
+            git_dep_digests,
+            artifact_name,
+        } => build_attestation_command(
+            artifact,
+            lockfile,
+            context,
+            sign_backend,
+            key,
+            output,
+            statement_only,
+            git_dep_digests,
+            artifact_name,
+            cli.verbose,
+        ),
     }
 }
 
@@ -2104,6 +2177,8 @@ mod verify_exit {
 fn verify_attestation_command(
     path: PathBuf,
     pubkey_arg: Option<String>,
+    certificate_identity: Option<String>,
+    certificate_oidc_issuer: String,
     artifact: Option<PathBuf>,
     json_output: bool,
     legacy: bool,
@@ -2114,17 +2189,6 @@ fn verify_attestation_command(
     if legacy {
         return verify_legacy_attestation(path, json_output);
     }
-
-    let pubkey_b64 = match pubkey_arg {
-        Some(arg) => slsa_resolve_pubkey(&arg).context("Failed to resolve --pubkey argument")?,
-        None => {
-            anyhow::bail!(
-                "--pubkey is required for non-legacy verification. \
-                 Pass a base64-encoded ed25519 public key or a path to a key file. \
-                 To inspect a legacy `build_attestation.json` without verification, add --legacy."
-            );
-        }
-    };
 
     let envelope_bytes = std::fs::read(&path)
         .with_context(|| format!("Failed to read attestation file: {}", path.display()))?;
@@ -2137,25 +2201,81 @@ fn verify_attestation_command(
         }
     };
 
-    let statement = match envelope.verify(&pubkey_b64) {
-        Ok(s) => s,
-        Err(MkpeError::VerificationFailed(msg)) => {
-            slsa_emit_failure(json_output, "signature_invalid", &msg, &path);
-            std::process::exit(verify_exit::SIG_INVALID);
+    let has_bundle = envelope
+        .signatures
+        .first()
+        .and_then(|s| s.sigstore_bundle.as_ref())
+        .is_some();
+
+    if certificate_identity.is_some() && !has_bundle {
+        anyhow::bail!(
+            "--certificate-identity was set but this attestation has no Sigstore bundle; \
+             use --pubkey for ed25519-signed envelopes."
+        );
+    }
+
+    let statement = if has_bundle {
+        let identity = certificate_identity.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "This attestation embeds a Sigstore bundle. Pass --certificate-identity \
+                 (typically the SLSA builder.id, e.g. workflow URI@ref) and optionally \
+                 --certificate-oidc-issuer (default: GitHub Actions)."
+            )
+        })?;
+        let issuer = certificate_oidc_issuer.trim();
+        match envelope.verify_cosign_keyless(identity, issuer) {
+            Ok(s) => s,
+            Err(MkpeError::VerificationFailed(msg)) => {
+                slsa_emit_failure(json_output, "signature_invalid", &msg, &path);
+                std::process::exit(verify_exit::SIG_INVALID);
+            }
+            Err(MkpeError::SchemaValidation(msg)) => {
+                slsa_emit_failure(json_output, "schema_invalid", &msg, &path);
+                std::process::exit(verify_exit::SCHEMA_INVALID);
+            }
+            Err(MkpeError::DsseError(msg)) => {
+                slsa_emit_failure(json_output, "malformed_envelope", &msg, &path);
+                std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+            }
+            Err(MkpeError::JsonError(e)) => {
+                slsa_emit_failure(json_output, "malformed_envelope", &e.to_string(), &path);
+                std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+            }
+            Err(other) => return Err(other.into()),
         }
-        Err(MkpeError::SchemaValidation(msg)) => {
-            slsa_emit_failure(json_output, "schema_invalid", &msg, &path);
-            std::process::exit(verify_exit::SCHEMA_INVALID);
+    } else {
+        let pubkey_b64 = match pubkey_arg {
+            Some(arg) => slsa_resolve_pubkey(&arg).context("Failed to resolve --pubkey argument")?,
+            None => {
+                anyhow::bail!(
+                    "--pubkey is required for ed25519 envelopes. \
+                     For Sigstore keyless attestations (with an embedded bundle), \
+                     pass --certificate-identity (and optionally --certificate-oidc-issuer). \
+                     To inspect a legacy `build_attestation.json` without verification, add --legacy."
+                );
+            }
+        };
+
+        match envelope.verify(&pubkey_b64) {
+            Ok(s) => s,
+            Err(MkpeError::VerificationFailed(msg)) => {
+                slsa_emit_failure(json_output, "signature_invalid", &msg, &path);
+                std::process::exit(verify_exit::SIG_INVALID);
+            }
+            Err(MkpeError::SchemaValidation(msg)) => {
+                slsa_emit_failure(json_output, "schema_invalid", &msg, &path);
+                std::process::exit(verify_exit::SCHEMA_INVALID);
+            }
+            Err(MkpeError::DsseError(msg)) => {
+                slsa_emit_failure(json_output, "malformed_envelope", &msg, &path);
+                std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+            }
+            Err(MkpeError::JsonError(e)) => {
+                slsa_emit_failure(json_output, "malformed_envelope", &e.to_string(), &path);
+                std::process::exit(verify_exit::MALFORMED_ENVELOPE);
+            }
+            Err(other) => return Err(other.into()),
         }
-        Err(MkpeError::DsseError(msg)) => {
-            slsa_emit_failure(json_output, "malformed_envelope", &msg, &path);
-            std::process::exit(verify_exit::MALFORMED_ENVELOPE);
-        }
-        Err(MkpeError::JsonError(e)) => {
-            slsa_emit_failure(json_output, "malformed_envelope", &e.to_string(), &path);
-            std::process::exit(verify_exit::MALFORMED_ENVELOPE);
-        }
-        Err(other) => return Err(other.into()),
     };
 
     if let Some(artifact_path) = artifact.as_ref() {
@@ -2257,7 +2377,9 @@ fn verify_legacy_attestation(path: PathBuf, json_output: bool) -> Result<()> {
         eprintln!(
             "To produce a real, signed attestation for the current build, use:\n  \
              mkpe build-attestation --artifact <path> --context <ctx.json> \\\n    \
-                                    --key <key> --output <envelope.intoto.jsonl>"
+                                    --sign-backend local --key <key> --output <envelope.intoto.jsonl>\n\
+             or on GitHub Actions with cosign installed:\n  \
+             mkpe build-attestation ... --sign-backend cosign-keyless --output <envelope.intoto.jsonl>"
         );
     }
 
@@ -2268,12 +2390,25 @@ fn build_attestation_command(
     artifact: PathBuf,
     lockfile: PathBuf,
     context: PathBuf,
-    key_path: PathBuf,
-    output: PathBuf,
+    sign_backend: SignBackend,
+    key_path: Option<PathBuf>,
+    output: Option<PathBuf>,
+    statement_only: Option<PathBuf>,
+    git_dep_digests: Option<PathBuf>,
     artifact_name: Option<String>,
     verbose: bool,
 ) -> Result<()> {
-    use morse_kirby_core::{produce_attestation, BuildContext, BuildContextSpec, KeyPair};
+    use morse_kirby_core::{
+        prepare_attestation, produce_attestation_with_options, BuildContext, BuildContextSpec,
+        CosignCliKeylessSigner, KeyPair, ProduceOptions,
+    };
+    use std::collections::BTreeMap;
+
+    if output.is_none() && statement_only.is_none() {
+        anyhow::bail!(
+            "specify --output (signed DSSE envelope), --statement-only (unsigned canonical Statement), or both"
+        );
+    }
 
     println!("{} {}", "📝 Building attestation for:".bold().cyan(), artifact.display());
 
@@ -2287,28 +2422,108 @@ fn build_attestation_command(
     let ctx = BuildContext::from_spec(spec, artifact.clone(), lockfile, artifact_name)
         .context("Failed to assemble BuildContext from spec")?;
 
-    let private_key = std::fs::read_to_string(&key_path)
-        .with_context(|| format!("Failed to read private key: {}", key_path.display()))?;
-    let public_key_path = key_path.with_file_name("mkpe_public.key");
-    let public_key = std::fs::read_to_string(&public_key_path).with_context(|| {
-        format!(
-            "Failed to read public key (expected {} alongside the private key)",
-            public_key_path.display()
-        )
-    })?;
-    let key = KeyPair::new(
-        private_key.trim().to_string(),
-        public_key.trim().to_string(),
-        uuid::Uuid::new_v4().to_string(),
-    );
+    let git_map: Option<BTreeMap<String, String>> = match &git_dep_digests {
+        Some(p) => {
+            let text = std::fs::read_to_string(p)
+                .with_context(|| format!("Failed to read --git-dep-digests file: {}", p.display()))?;
+            Some(serde_json::from_str(&text).with_context(|| {
+                format!(
+                    "Failed to parse --git-dep-digests JSON at {}",
+                    p.display()
+                )
+            })?)
+        }
+        None => None,
+    };
 
-    let result = produce_attestation(&ctx, &key).context("Failed to produce attestation")?;
+    let opts = ProduceOptions {
+        git_dep_digests: git_map.as_ref(),
+    };
 
-    for w in &result.warnings {
-        eprintln!("{} {}", "⚠".yellow().bold(), w.yellow());
+    if let Some(out_path) = &output {
+        if matches!(sign_backend, SignBackend::Local) {
+            let kp = key_path.as_ref().context(
+                "--key is required when using --sign-backend local with --output (signed envelope)",
+            )?;
+            let private_key = std::fs::read_to_string(kp)
+                .with_context(|| format!("Failed to read private key: {}", kp.display()))?;
+            let public_key_path = kp.with_file_name("mkpe_public.key");
+            let public_key = std::fs::read_to_string(&public_key_path).with_context(|| {
+                format!(
+                    "Failed to read public key (expected {} alongside the private key)",
+                    public_key_path.display()
+                )
+            })?;
+            let key = KeyPair::new(
+                private_key.trim().to_string(),
+                public_key.trim().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            );
+            let result = produce_attestation_with_options(&ctx, &key, opts).context("Failed to produce attestation")?;
+            emit_build_warnings(&result.warnings);
+            write_envelope_and_maybe_statement(result, out_path, statement_only.as_ref(), verbose)?;
+        } else {
+            let signer = CosignCliKeylessSigner::new(ctx.builder_id.clone());
+            let result =
+                produce_attestation_with_options(&ctx, &signer, opts).context("Failed to produce attestation")?;
+            emit_build_warnings(&result.warnings);
+            write_envelope_and_maybe_statement(result, out_path, statement_only.as_ref(), verbose)?;
+        }
+    } else if let Some(stmt_path) = &statement_only {
+        let (statement, warnings) =
+            prepare_attestation(&ctx, opts).context("Failed to build attestation statement")?;
+        statement
+            .validate_schema()
+            .context("Statement failed schema validation")?;
+        emit_build_warnings(&warnings);
+        write_statement_bytes(&statement, stmt_path)?;
+        if verbose {
+            println!("  {} {}", "Statement:".bold(), stmt_path.display());
+        }
+        println!("{}", "✓ Canonical statement written".green().bold());
     }
 
-    if let Some(parent) = output.parent() {
+    Ok(())
+}
+
+fn emit_build_warnings(warnings: &[String]) {
+    for w in warnings {
+        eprintln!("{} {}", "⚠".yellow().bold(), w.yellow());
+    }
+}
+
+fn write_statement_bytes(
+    statement: &morse_kirby_core::Statement,
+    path: &std::path::Path,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create output directory: {}", parent.display())
+            })?;
+        }
+    }
+    let bytes = statement
+        .to_canonical_json()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    std::fs::write(path, bytes).with_context(|| format!("Failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn write_envelope_and_maybe_statement(
+    result: morse_kirby_core::ProducedAttestation,
+    out_path: &std::path::Path,
+    statement_only: Option<&std::path::PathBuf>,
+    verbose: bool,
+) -> Result<()> {
+    if let Some(stmt_path) = statement_only {
+        write_statement_bytes(&result.statement, stmt_path)?;
+        if verbose {
+            println!("  {} {}", "Statement:".bold(), stmt_path.display());
+        }
+    }
+
+    if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("Failed to create output directory: {}", parent.display())
@@ -2317,11 +2532,11 @@ fn build_attestation_command(
     }
     let json = serde_json::to_string_pretty(&result.envelope)
         .context("Failed to serialize DSSE envelope")?;
-    std::fs::write(&output, json)
-        .with_context(|| format!("Failed to write attestation: {}", output.display()))?;
+    std::fs::write(out_path, json)
+        .with_context(|| format!("Failed to write attestation: {}", out_path.display()))?;
 
     println!("{}", "✓ Attestation produced".green().bold());
-    println!("  {} {}", "Output:".bold(), output.display());
+    println!("  {} {}", "Output:".bold(), out_path.display());
     println!(
         "  {} {} subject(s)",
         "Subjects:".bold(),

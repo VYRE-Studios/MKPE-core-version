@@ -11,9 +11,13 @@ publish = false
 name = "mkpe"
 path = "src/main.rs"
 
+[features]
+default = ["tpm", "yubikey"]
+tpm = ["morse_kirby_core/tpm"]
+yubikey = ["morse_kirby_core/yubikey"]
+
 [dependencies]
-# Core MKPE library
-morse_kirby_core = { path = "../core" }
+morse_kirby_core = { path = "../core", default-features = false }
 
 # CLI framework
 clap = { version = "4", features = ["derive", "cargo"] }

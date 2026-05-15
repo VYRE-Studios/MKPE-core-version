@@ -116,6 +116,51 @@ pub fn parse_lockfile<P: AsRef<Path>>(path: P) -> Result<ParsedLockfile> {
     parse_lockfile_str(&text)
 }
 
+/// Merge pre-computed SHA-256 digests for git-sourced packages into `parsed`.
+///
+/// `digests` maps the **exact** `source` string from `Cargo.lock` to a
+/// lowercase 64-hex SHA-256 of the attested source tree. Every key must match
+/// a row in [`ParsedLockfile::git_deps_without_digest`].
+pub fn apply_git_dep_digests(
+    parsed: &mut ParsedLockfile,
+    digests: &std::collections::BTreeMap<String, String>,
+) -> Result<()> {
+    if digests.is_empty() {
+        return Ok(());
+    }
+
+    for (src, digest_hex) in digests {
+        if !is_lowercase_sha256(digest_hex) {
+            return Err(MkpeError::ProvenanceError(format!(
+                "git dep digest for {src:?} must be 64 lowercase hex chars; got {digest_hex:?}"
+            )));
+        }
+        let pos = parsed
+            .git_deps_without_digest
+            .iter()
+            .position(|g| g.source == *src)
+            .ok_or_else(|| {
+                MkpeError::ProvenanceError(format!(
+                    "git_dep_digests entry references unknown or non-git source {src:?}; \
+                     keys must match Cargo.lock [[package]].source exactly"
+                ))
+            })?;
+        let git = parsed.git_deps_without_digest.remove(pos);
+        parsed.resolved.push(ResolvedDependency {
+            uri: format!("pkg:cargo/{}@{}", git.name, git.version),
+            digest: Digest {
+                sha256: digest_hex.clone(),
+                ..Default::default()
+            },
+            name: Some(git.name),
+            version: Some(git.version),
+        });
+    }
+
+    parsed.resolved.sort_by(|a, b| a.uri.cmp(&b.uri));
+    Ok(())
+}
+
 /// Same as [`parse_lockfile`] but takes the lockfile contents directly.
 /// Used by tests and by callers that have already loaded the file.
 pub fn parse_lockfile_str(text: &str) -> Result<ParsedLockfile> {
@@ -310,6 +355,45 @@ checksum = "not-a-hex-string-not-the-right-length-NOT-LOWERCASE-XXXXXXXXXXXXX"
         assert!(
             format!("{err}").contains("non-sha256 checksum"),
             "expected sha256 validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn apply_git_dep_digests_promotes_git_packages() {
+        let mut parsed = parse_lockfile_str(SAMPLE).expect("parse");
+        assert_eq!(parsed.git_deps_without_digest.len(), 1);
+        let src = parsed.git_deps_without_digest[0].source.clone();
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(
+            src,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        );
+        apply_git_dep_digests(&mut parsed, &m).expect("apply");
+        assert!(parsed.git_deps_without_digest.is_empty());
+        assert_eq!(parsed.resolved.len(), 3);
+        let git = parsed
+            .resolved
+            .iter()
+            .find(|d| d.name.as_deref() == Some("some_git_dep"))
+            .expect("git dep in resolved");
+        assert_eq!(
+            git.digest.sha256,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn apply_git_dep_digests_rejects_unknown_source_key() {
+        let mut parsed = parse_lockfile_str(SAMPLE).expect("parse");
+        let mut m = std::collections::BTreeMap::new();
+        m.insert(
+            "git+https://github.com/nope/nope?rev=0#0".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        );
+        let err = apply_git_dep_digests(&mut parsed, &m).expect_err("unknown key");
+        assert!(
+            format!("{err}").contains("unknown"),
+            "unexpected err: {err}"
         );
     }
 

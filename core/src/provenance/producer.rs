@@ -201,37 +201,27 @@ pub struct ProducedAttestation {
 // Producer entry point
 // ---------------------------------------------------------------------------
 
-/// Produce a signed DSSE envelope for the given build context.
-///
-/// The `signer` is any backend that implements [`ProvenanceSigner`]:
-/// a `&KeyPair` for local-file ed25519 (Phase 1.6 default), an
-/// `Ed25519LocalSigner` when call-site readability matters, or a
-/// future Sigstore-keyless / KMS signer once Phase 2.2 lands. The
-/// producer is intentionally indifferent -- it only knows it gets
-/// signed bytes back; the trust policy lives in the verifier.
-///
-/// Failure modes (each surfaces as a distinct error variant):
-///
-/// * `MkpeError::IoError` -- artifact or lockfile unreadable.
-/// * `MkpeError::ProvenanceError` -- lockfile malformed, or invariant
-///   violation caught by `StatementBuilder::build()`.
-/// * `MkpeError::SchemaValidation` -- the assembled Statement doesn't
-///   match the embedded JSON Schema. This is a producer bug -- the schema
-///   and the Rust types should never disagree -- so we surface it as an
-///   error rather than swallowing it.
-/// * `MkpeError::CryptoError` -- the signing key is malformed or the
-///   signer backend (Fulcio, KMS, ...) rejected the request.
-pub fn produce<S: ProvenanceSigner + ?Sized>(
+/// Optional lockfile merge inputs for [`produce_with_options`].
+#[derive(Debug, Clone, Default)]
+pub struct ProduceOptions<'a> {
+    /// Maps `Cargo.lock` `[[package]].source` (git URL) to a lowercase
+    /// 64-hex SHA-256 of the checked-out source tree. See
+    /// [`lockfile::apply_git_dep_digests`].
+    pub git_dep_digests: Option<&'a BTreeMap<String, String>>,
+}
+
+/// Build and validate the in-toto Statement (artifact hash, lockfile closure)
+/// without signing. Used for CI reproducibility checks and `--statement-only`.
+pub fn prepare_attestation(
     ctx: &BuildContext,
-    signer: &S,
-) -> Result<ProducedAttestation> {
-    // 1. Hash the artifact. Done first so we fail fast on unreadable files.
+    opts: ProduceOptions<'_>,
+) -> Result<(Statement, Vec<String>)> {
     let artifact_sha256 = hash_file_sha256(&ctx.artifact_path)?;
 
-    // 2. Parse the lockfile. Workspace members are surfaced for diagnostics
-    //    but never included as resolvedDependencies (they're the artifact,
-    //    not its inputs).
-    let parsed = lockfile::parse_lockfile(&ctx.cargo_lock_path)?;
+    let mut parsed = lockfile::parse_lockfile(&ctx.cargo_lock_path)?;
+    if let Some(map) = opts.git_dep_digests {
+        lockfile::apply_git_dep_digests(&mut parsed, map)?;
+    }
 
     let mut warnings = Vec::new();
     if !parsed.git_deps_without_digest.is_empty() {
@@ -247,9 +237,6 @@ pub fn produce<S: ProvenanceSigner + ?Sized>(
         ));
     }
 
-    // 3. Assemble the Statement via the existing builder. The builder
-    //    enforces invariants (target whitelist, hex digest, time order)
-    //    that we don't re-validate here; one source of truth is enough.
     let statement = Statement::builder()
         .subject(&ctx.artifact_name, &artifact_sha256)
         .external_parameters(ExternalParameters {
@@ -281,18 +268,49 @@ pub fn produce<S: ProvenanceSigner + ?Sized>(
         })
         .build()?;
 
-    // 4. Sign. `Statement::sign()` validates against the JSON Schema before
-    //    signing, so an envelope that comes out of here is guaranteed to
-    //    pass verification against the same schema. The signer is opaque
-    //    here -- we don't inspect its algorithm or key_id beyond what's
-    //    captured in the returned envelope.
-    let envelope = statement.sign(signer)?;
+    Ok((statement, warnings))
+}
 
+/// Produce a signed DSSE envelope for the given build context.
+///
+/// The `signer` is any backend that implements [`ProvenanceSigner`]:
+/// a `&KeyPair` for local-file ed25519 (Phase 1.6 default), an
+/// `Ed25519LocalSigner` when call-site readability matters, or
+/// [`super::CosignCliKeylessSigner`] for Sigstore keyless via the cosign CLI.
+/// The producer is intentionally indifferent -- it only knows it gets
+/// signed bytes back; the trust policy lives in the verifier.
+///
+/// Failure modes (each surfaces as a distinct error variant):
+///
+/// * `MkpeError::IoError` -- artifact or lockfile unreadable.
+/// * `MkpeError::ProvenanceError` -- lockfile malformed, or invariant
+///   violation caught by `StatementBuilder::build()`.
+/// * `MkpeError::SchemaValidation` -- the assembled Statement doesn't
+///   match the embedded JSON Schema. This is a producer bug -- the schema
+///   and the Rust types should never disagree -- so we surface it as an
+///   error rather than swallowing it.
+/// * `MkpeError::CryptoError` -- the signing key is malformed or the
+///   signer backend (Fulcio, KMS, ...) rejected the request.
+pub fn produce_with_options<S: ProvenanceSigner + ?Sized>(
+    ctx: &BuildContext,
+    signer: &S,
+    opts: ProduceOptions<'_>,
+) -> Result<ProducedAttestation> {
+    let (statement, warnings) = prepare_attestation(ctx, opts)?;
+    let envelope = statement.sign(signer)?;
     Ok(ProducedAttestation {
         envelope,
         statement,
         warnings,
     })
+}
+
+/// Same as [`produce_with_options`] with default options (no git tree digests).
+pub fn produce<S: ProvenanceSigner + ?Sized>(
+    ctx: &BuildContext,
+    signer: &S,
+) -> Result<ProducedAttestation> {
+    produce_with_options(ctx, signer, ProduceOptions::default())
 }
 
 // ---------------------------------------------------------------------------
@@ -480,6 +498,94 @@ source = "git+https://github.com/example/fork?rev=abc#abc"
             0,
             "git deps must NOT be included in resolvedDependencies"
         );
+    }
+
+    #[test]
+    fn produce_with_git_digest_includes_git_in_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let artifact = tmp.path().join("mkpe-test.bin");
+        std::fs::write(&artifact, b"attested-content").unwrap();
+
+        let lockfile = tmp.path().join("Cargo.lock");
+        std::fs::write(
+            &lockfile,
+            r#"
+version = 3
+
+[[package]]
+name = "mkpe_local"
+version = "0.0.0"
+
+[[package]]
+name = "some_fork"
+version = "0.1.0"
+source = "git+https://github.com/example/fork?rev=abc#abc"
+"#,
+        )
+        .unwrap();
+
+        let started: chrono::DateTime<chrono::Utc> = "2026-06-01T12:00:00Z".parse().unwrap();
+        let finished: chrono::DateTime<chrono::Utc> = "2026-06-01T12:14:23Z".parse().unwrap();
+        let ctx = BuildContext {
+            artifact_path: artifact,
+            artifact_name: "mkpe-test.bin".into(),
+            cargo_lock_path: lockfile,
+            source_uri: "git+https://github.com/VyreVault/mkpe@1111111111111111111111111111111111111111".into(),
+            source_ref: "refs/tags/v1.1.0".into(),
+            target: "x86_64-pc-windows-msvc".into(),
+            profile: "dist".into(),
+            workflow: WorkflowRef {
+                path: ".github/workflows/release.yml".into(),
+                ref_: "2".repeat(40),
+            },
+            rust_toolchain: RustToolchain {
+                channel: "1.93.1".into(),
+                host: "x86_64-unknown-linux-gnu".into(),
+                rustc_commit: Some("3".repeat(40)),
+            },
+            runner: Runner {
+                os: "ubuntu-24.04".into(),
+                arch: "x86_64".into(),
+                image: format!("ghcr.io/runners/ubuntu-24.04@sha256:{}", "4".repeat(64)),
+            },
+            cross_compiler: Some(CrossCompiler {
+                tool: "cargo-xwin".into(),
+                tool_version: "0.18.0".into(),
+                msvc_sdk_sha256: "5".repeat(64),
+                clang_version: "18.1.8".into(),
+            }),
+            builder_id: "https://github.com/VyreVault/mkpe/.github/workflows/release.yml@refs/tags/v1.1.0".into(),
+            builder_versions: BTreeMap::new(),
+            invocation_id: "https://github.com/VyreVault/mkpe/actions/runs/99999999".into(),
+            started_on: started,
+            finished_on: finished,
+        };
+
+        let mut m = BTreeMap::new();
+        m.insert(
+            "git+https://github.com/example/fork?rev=abc#abc".into(),
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
+        );
+        let opts = ProduceOptions {
+            git_dep_digests: Some(&m),
+        };
+        let key = generate_keypair();
+        let result = produce_with_options(&ctx, &key, opts).expect("produce");
+
+        assert!(
+            !result.warnings.iter().any(|w| w.contains("some_fork")),
+            "git dep should not be warned when digest supplied: {:?}",
+            result.warnings
+        );
+        let names: Vec<_> = result
+            .statement
+            .predicate
+            .build_definition
+            .resolved_dependencies
+            .iter()
+            .filter_map(|d| d.name.as_deref())
+            .collect();
+        assert!(names.contains(&"some_fork"));
     }
 
     #[test]

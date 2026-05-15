@@ -19,9 +19,10 @@
 //!   the subject digest in the Statement matches the artifact it's
 //!   validating; this module surfaces the Statement's subjects so callers
 //!   can do that comparison.
-//! - **Wrong-key acceptance:** verification requires the caller to provide
-//!   the expected public key; we never auto-trust any key embedded in the
-//!   envelope.
+//! - **Wrong-key acceptance:** for local ed25519, verification requires the
+//!   caller-supplied public key. For Sigstore keyless, trust is established
+//!   via `cosign verify-blob` with explicit certificate identity policy; MKPE
+//!   does not auto-trust keys from the envelope alone.
 //! - **Payload-type confusion:** DSSE PAE includes the `payloadType` in
 //!   the signed bytes, so an envelope signed for `application/vnd.in-toto+json`
 //!   cannot be silently re-interpreted as a different format.
@@ -36,10 +37,12 @@ use chrono::{DateTime, Utc};
 use jsonschema::JSONSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod cosign_cli;
 pub mod lockfile;
 pub mod producer;
 pub mod signing;
 
+pub use cosign_cli::CosignCliKeylessSigner;
 pub use signing::{Ed25519LocalSigner, ProvenanceSigner, SigAlgorithm, SignatureMaterial};
 
 // ---------------------------------------------------------------------------
@@ -408,6 +411,7 @@ impl Statement {
                 keyid: mat.key_id,
                 sig: general_purpose::STANDARD.encode(&mat.signature),
                 cert: mat.cert_chain_pem,
+                sigstore_bundle: mat.sigstore_bundle.clone(),
             }],
         })
     }
@@ -568,6 +572,10 @@ pub struct DsseSignature {
     /// shape backward-compatible with envelopes issued before Phase 2.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cert: Option<String>,
+    /// Full Sigstore bundle from `cosign sign-blob --bundle`. When present,
+    /// verification uses `cosign verify-blob` instead of ed25519 pubkey.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sigstore_bundle: Option<serde_json::Value>,
 }
 
 impl DsseEnvelope {
@@ -593,7 +601,61 @@ impl DsseEnvelope {
     /// Steps 1 and 2 prevent the attacker from substituting either the
     /// payload type or the payload bytes. Step 3 prevents a downgrade to a
     /// malformed Statement that signature verification alone wouldn't catch.
+    ///
+    /// Envelopes produced with [`CosignCliKeylessSigner`] embed a Sigstore
+    /// bundle and **cannot** be verified with this method; use
+    /// [`Self::verify_cosign_keyless`] instead.
     pub fn verify(&self, expected_pubkey_b64: &str) -> Result<Statement> {
+        if self.signatures.iter().any(|s| s.sigstore_bundle.is_some()) {
+            return Err(MkpeError::DsseError(
+                "envelope contains a Sigstore bundle; use DsseEnvelope::verify_cosign_keyless \
+                 or `mkpe verify-attestation --certificate-identity ... --certificate-oidc-issuer ...`"
+                    .into(),
+            ));
+        }
+        self.verify_ed25519_pubkey(expected_pubkey_b64)
+    }
+
+    /// Verify a Sigstore keyless envelope by delegating to `cosign verify-blob`.
+    /// The first signature must carry [`DsseSignature::sigstore_bundle`].
+    pub fn verify_cosign_keyless(
+        &self,
+        certificate_identity: &str,
+        certificate_oidc_issuer: &str,
+    ) -> Result<Statement> {
+        if self.payload_type != PAYLOAD_TYPE {
+            return Err(MkpeError::DsseError(format!(
+                "unexpected payloadType {:?}; expected {:?}",
+                self.payload_type, PAYLOAD_TYPE
+            )));
+        }
+        if self.signatures.is_empty() {
+            return Err(MkpeError::DsseError("envelope has no signatures".into()));
+        }
+        let bundle = self.signatures[0].sigstore_bundle.as_ref().ok_or_else(|| {
+            MkpeError::DsseError(
+                "verify_cosign_keyless requires sigstore_bundle on the first signature".into(),
+            )
+        })?;
+
+        let payload_bytes = general_purpose::STANDARD
+            .decode(&self.payload)
+            .map_err(MkpeError::Base64Error)?;
+        let pae = dsse_pae(self.payload_type.as_bytes(), &payload_bytes);
+
+        cosign_cli::verify_blob_with_cosign(
+            &pae,
+            bundle,
+            certificate_identity,
+            certificate_oidc_issuer,
+        )?;
+
+        let statement: Statement = serde_json::from_slice(&payload_bytes).map_err(MkpeError::JsonError)?;
+        statement.validate_schema()?;
+        Ok(statement)
+    }
+
+    fn verify_ed25519_pubkey(&self, expected_pubkey_b64: &str) -> Result<Statement> {
         if self.payload_type != PAYLOAD_TYPE {
             return Err(MkpeError::DsseError(format!(
                 "unexpected payloadType {:?}; expected {:?}",
@@ -920,6 +982,18 @@ mod tests {
     }
 
     #[test]
+    fn verify_rejects_pubkey_when_sigstore_bundle_present() {
+        let stmt = sample_statement();
+        let key = generate_keypair();
+        let mut envelope = stmt.sign(&key).expect("sign");
+        envelope.signatures[0].sigstore_bundle = Some(serde_json::json!({}));
+        let err = envelope
+            .verify(&key.public_key)
+            .expect_err("must not use ed25519 path");
+        assert!(matches!(err, MkpeError::DsseError(_)));
+    }
+
+    #[test]
     fn unknown_payload_type_in_envelope_is_rejected() {
         let env = DsseEnvelope {
             payload: general_purpose::STANDARD.encode(b"{}"),
@@ -928,6 +1002,7 @@ mod tests {
                 keyid: "x".into(),
                 sig: "x".into(),
                 cert: None,
+                sigstore_bundle: None,
             }],
         };
         let err = env.verify("AAAA").expect_err("must reject");

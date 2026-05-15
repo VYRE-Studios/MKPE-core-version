@@ -32,11 +32,9 @@
 //!
 //! ## What this module does *not* abstract
 //!
-//! Verification. Phase 2.1 only widens the producer side. Sigstore
-//! verification (cert-chain validation, Rekor inclusion proofs) needs
-//! a parallel `ProvenanceVerifier` abstraction; that lands in Phase 2.2
-//! alongside the Sigstore signing impl so the two designs evolve
-//! together rather than guess at each other.
+//! Verification for Sigstore keyless envelopes is delegated to the
+//! `cosign verify-blob` CLI (see `cosign_cli`); MKPE does not walk Fulcio
+//! chains or Rekor proofs in-process.
 
 use crate::{KeyPair, MkpeError, Result};
 use base64::{engine::general_purpose, Engine as _};
@@ -95,6 +93,9 @@ pub struct SignatureMaterial {
     /// PEM-encoded leaf-and-intermediates cert chain. Populated only
     /// by Sigstore-keyless. `None` everywhere else.
     pub cert_chain_pem: Option<String>,
+    /// Full Sigstore bundle JSON from `cosign sign-blob --bundle`, when
+    /// applicable. Required for `cosign verify-blob` at verification time.
+    pub sigstore_bundle: Option<serde_json::Value>,
 }
 
 /// Strategy-pattern interface for producing one DSSE signature.
@@ -135,8 +136,8 @@ pub trait ProvenanceSigner {
 /// fallback identity model for offline builds and tests.
 ///
 /// Security caveat: the private key bytes pass through this struct in
-/// memory. For long-lived production keys, use the future
-/// `SigstoreKeylessSigner` (Phase 2.2) so no long-lived key exists in
+/// memory. For long-lived production keys, use
+/// [`super::cosign_cli::CosignCliKeylessSigner`] (Phase 2.2) so no long-lived key exists in
 /// the first place.
 #[derive(Debug, Clone)]
 pub struct Ed25519LocalSigner {
@@ -202,6 +203,7 @@ impl ProvenanceSigner for Ed25519LocalSigner {
             key_id: self.keypair.key_id.clone(),
             signature: bytes,
             cert_chain_pem: None,
+            sigstore_bundle: None,
         })
     }
 }

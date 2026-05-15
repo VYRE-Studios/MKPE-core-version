@@ -101,15 +101,21 @@ pub use error::{MkpeError, Result};
 // pub use slsa::{BuildDefinition, BuildMetadata, Builder, Byproduct, ProvenancePredicate, ResolvedDependency, RunDetails, SLSA_PROVENANCE_PREDICATE_TYPE};
 pub use provenance::{
     Builder as ProvenanceBuilder, BuildDefinition, Byproduct, CrossCompiler, Digest,
-    DsseEnvelope, DsseSignature, Ed25519LocalSigner, ExternalParameters, InternalParameters,
+    CosignCliKeylessSigner, DsseEnvelope, DsseSignature, Ed25519LocalSigner, ExternalParameters,
+    InternalParameters,
     Metadata, ProvenanceSigner, ResolvedDependency, Runner, RustToolchain, RunDetails,
     SigAlgorithm, SignatureMaterial, SlsaProvenance, Statement, StatementBuilder, Subject,
     WorkflowRef, BUILD_TYPE, PAYLOAD_TYPE, PREDICATE_TYPE, STATEMENT_TYPE, SUPPORTED_PROFILES,
     SUPPORTED_TARGETS,
 };
-pub use provenance::lockfile::{parse_lockfile, parse_lockfile_str, GitDep, ParsedLockfile};
+pub use provenance::lockfile::{
+    apply_git_dep_digests, parse_lockfile, parse_lockfile_str, GitDep, ParsedLockfile,
+};
 pub use provenance::producer::{
-    produce as produce_attestation, BuildContext, BuildContextSpec, ProducedAttestation,
+    prepare_attestation,
+    produce as produce_attestation,
+    produce_with_options as produce_attestation_with_options,
+    BuildContext, BuildContextSpec, ProduceOptions, ProducedAttestation,
 };
 
 /// MKPE version constant
