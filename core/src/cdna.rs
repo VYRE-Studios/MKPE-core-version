@@ -201,7 +201,7 @@ impl CdnaSchema {
     }
 
     /// Create a proof for this C-DNA schema
-    pub fn create_proof(&self, keypair: &crate::crypto::KeyPair) -> crate::Result<CdnaProof> {
+    pub fn create_proof(&self, keypair: &dyn crate::crypto::Signer) -> crate::Result<CdnaProof> {
         let schema_hash = self.calculate_hash();
         let proof_id = uuid::Uuid::new_v4().to_string();
         let timestamp = chrono::Utc::now();
@@ -215,7 +215,7 @@ impl CdnaSchema {
             schema_hash,
             timestamp,
             signature,
-            verifier_public_key: keypair.public_key.clone(),
+            verifier_public_key: keypair.public_key()?,
         })
     }
 }

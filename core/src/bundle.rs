@@ -184,6 +184,9 @@ pub struct MkpeArchive {
     pub manifest: Manifest,
     /// Proof bundles contained in this archive
     pub bundles: Vec<ProofBundle>,
+    /// Ownership chain for the asset (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<crate::ownership::OwnershipChain>,
     /// Creation metadata
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Archive format version
@@ -198,19 +201,29 @@ pub struct ArtifactVerificationReport {
     pub manifest_id: String,
 }
 
+/// Serializable proof section wrapper — used when ownership chain is
+/// embedded so the archive remains a single self-contained file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProofSection {
+    pub bundles: Vec<ProofBundle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ownership: Option<crate::ownership::OwnershipChain>,
+}
+
 impl MkpeArchive {
     /// Create a new MKPE archive
     pub fn new(manifest: Manifest, bundles: Vec<ProofBundle>) -> Self {
         Self {
             manifest,
             bundles,
+            ownership: None,
             created_at: chrono::Utc::now(),
             format_version: "1.0.0".to_string(),
         }
     }
 
     /// Save archive to a .mkpe file using binary format v1.0
-    pub fn save<P: AsRef<Path>>(&self, path: P, keypair: &crate::crypto::KeyPair) -> Result<()> {
+    pub fn save<P: AsRef<Path>>(&self, path: P, keypair: &dyn crate::crypto::Signer) -> Result<()> {
         let mut file = File::create(path)?;
 
         // Section 1: Serialize manifest to canonical JSON (no extra whitespace)
@@ -255,7 +268,7 @@ impl MkpeArchive {
     pub fn save_with_encryption<P: AsRef<Path>>(
         &self,
         path: P,
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
         password: &str,
     ) -> Result<()> {
         let mut file = File::create(path)?;
@@ -315,7 +328,7 @@ impl MkpeArchive {
     pub fn save_compressed<P: AsRef<Path>>(
         &self,
         path: P,
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
     ) -> Result<()> {
         let mut file = File::create(path)?;
 
@@ -354,8 +367,20 @@ impl MkpeArchive {
     }
 
     /// Serialize proof section with full proof metadata.
+    ///
+    /// Backward-compatible: when `ownership` is `None`, emits a plain
+    /// `Vec<ProofBundle>` JSON array so legacy readers can still parse it.
+    /// When `ownership` is `Some`, emits a `ProofSection` wrapper object.
     fn serialize_proof_section(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(&self.bundles).map_err(MkpeError::from)
+        if let Some(ref chain) = self.ownership {
+            let section = ProofSection {
+                bundles: self.bundles.clone(),
+                ownership: Some(chain.clone()),
+            };
+            serde_json::to_vec(&section).map_err(MkpeError::from)
+        } else {
+            serde_json::to_vec(&self.bundles).map_err(MkpeError::from)
+        }
     }
 
     /// Create signature block (public key + signature)
@@ -363,7 +388,7 @@ impl MkpeArchive {
         &self,
         manifest: &[u8],
         proof_data: &[u8],
-        keypair: &crate::crypto::KeyPair,
+        keypair: &dyn crate::crypto::Signer,
     ) -> Result<Vec<u8>> {
         // Calculate SHA256 of all data to be signed
         let mut hasher = Sha256::new();
@@ -378,7 +403,7 @@ impl MkpeArchive {
 
         // Decode public key from base64
         let public_key_bytes = general_purpose::STANDARD
-            .decode(&keypair.public_key)
+            .decode(&keypair.public_key()?)
             .map_err(|e| MkpeError::BundleError(format!("Invalid public key: {}", e)))?;
 
         if public_key_bytes.len() != 32 {
@@ -482,7 +507,8 @@ impl MkpeArchive {
         };
 
         // Parse proof section
-        let bundles = Self::deserialize_proof_section(&proof_for_parsing, &manifest)?;
+        let (bundles, ownership) = Self::deserialize_proof_section(&proof_for_parsing, &manifest
+        )?;
 
         // Verify signature against ORIGINAL (uncompressed) data
         Self::verify_signature_block(&manifest_bytes, &proof_for_signature, &signature_bytes, &manifest)?;
@@ -490,11 +516,11 @@ impl MkpeArchive {
         Ok(MkpeArchive {
             manifest,
             bundles,
+            ownership,
             created_at: chrono::Utc::now(),
             format_version: "1.0.0".to_string(),
         })
     }
-
 
     /// Load encrypted archive with password decryption
     pub fn load_with_decryption<P: AsRef<Path>>(path: P, password: &str) -> Result<Self> {
@@ -560,7 +586,7 @@ impl MkpeArchive {
         let manifest: Manifest = serde_json::from_slice(manifest_bytes)?;
 
         // Parse proof section
-        let bundles = Self::deserialize_proof_section(proof_bytes, &manifest)?;
+        let (bundles, ownership) = Self::deserialize_proof_section(proof_bytes, &manifest)?;
 
         // Verify signature
         Self::verify_signature_block(manifest_bytes, proof_bytes, &signature_bytes, &manifest)?;
@@ -568,19 +594,30 @@ impl MkpeArchive {
         Ok(MkpeArchive {
             manifest,
             bundles,
+            ownership,
             created_at: chrono::Utc::now(),
             format_version: "1.0.0".to_string(),
         })
     }
 
-    /// Deserialize proof section, supporting current metadata JSON and legacy hash-only data.
-    fn deserialize_proof_section(data: &[u8], manifest: &Manifest) -> Result<Vec<ProofBundle>> {
+    /// Deserialize proof section, supporting current metadata JSON, ownership-wrapped JSON,
+    /// and legacy hash-only data.
+    fn deserialize_proof_section(
+        data: &[u8],
+        manifest: &Manifest,
+    ) -> Result<(Vec<ProofBundle>, Option<crate::ownership::OwnershipChain>)> {
         if data.len() < 4 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
 
+        // Try ownership-wrapping format first (JSON object with "bundles" key)
+        if let Ok(section) = serde_json::from_slice::<ProofSection>(data) {
+            return Ok((section.bundles, section.ownership));
+        }
+
+        // Try plain array of bundles (legacy / ownership-free)
         if let Ok(bundles) = serde_json::from_slice::<Vec<ProofBundle>>(data) {
-            return Ok(bundles);
+            return Ok((bundles, None));
         }
 
         // Read count
@@ -620,7 +657,7 @@ impl MkpeArchive {
         }
 
         if proofs.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), None));
         }
 
         // Create a single bundle
@@ -634,7 +671,7 @@ impl MkpeArchive {
             parent_bundle_id: None,
         };
 
-        Ok(vec![bundle])
+        Ok((vec![bundle], None))
     }
 
     /// Verify signature block
@@ -727,12 +764,26 @@ impl MkpeArchive {
             return Err(MkpeError::VerificationFailed("Root hash mismatch".into()));
         }
 
+        // 3. Verify ownership chain integrity if present
+        if let Some(ref chain) = self.ownership {
+            if !chain.is_valid() {
+                return Err(MkpeError::VerificationFailed(
+                    "Ownership chain contains revoked or non-executed transfers".into(),
+                ));
+            }
+        }
+
         Ok(VerifiedMkpeArchive(self))
     }
 
     /// Get archive statistics
     pub fn stats(&self) -> ArchiveStats {
         let total_proofs: usize = self.bundles.iter().map(|b| b.proofs.len()).sum();
+        let (has_ownership, transfer_count) = self
+            .ownership
+            .as_ref()
+            .map(|c| (true, c.transfer_count()))
+            .unwrap_or((false, 0));
 
         ArchiveStats {
             bundle_count: self.bundles.len(),
@@ -740,6 +791,8 @@ impl MkpeArchive {
             created_at: self.created_at,
             manifest_id: self.manifest.manifest_id.clone(),
             root_hash: self.manifest.bundle_root_hash.clone(),
+            has_ownership,
+            transfer_count,
         }
     }
 
@@ -804,6 +857,8 @@ pub struct ArchiveStats {
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub manifest_id: String,
     pub root_hash: String,
+    pub has_ownership: bool,
+    pub transfer_count: usize,
 }
 
 /// Default sidecar path for a proven artifact.
@@ -899,11 +954,12 @@ const fn generate_crc32_table() -> [u32; 256] {
     table
 }
 
-/// Create a .mkpe bundle from a directory
-pub fn create_mkpe_bundle<P: AsRef<Path>>(
+/// Create a .mkpe bundle from a directory with optional ownership chain.
+pub fn create_mkpe_bundle_with_ownership<P: AsRef<Path>>(
     dir_path: P,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     output_path: P,
+    ownership: Option<crate::ownership::OwnershipChain>,
 ) -> Result<MkpeArchive> {
     validate_bundle_output_path(dir_path.as_ref(), output_path.as_ref())?;
 
@@ -917,18 +973,28 @@ pub fn create_mkpe_bundle<P: AsRef<Path>>(
     let mut manifest = Manifest::new(
         bundle.root_hash.clone(),
         bundle.proofs.len(),
-        keypair.public_key.clone(),
+        keypair.public_key()?,
         None,
     );
     manifest.sign(keypair)?;
 
     // Create archive
-    let archive = MkpeArchive::new(manifest, vec![bundle]);
+    let mut archive = MkpeArchive::new(manifest, vec![bundle]);
+    archive.ownership = ownership;
 
     // Save to file with keypair for bundle signature
     archive.save(output_path, keypair)?;
 
     Ok(archive)
+}
+
+/// Create a .mkpe bundle from a directory (no ownership).
+pub fn create_mkpe_bundle<P: AsRef<Path>>(
+    dir_path: P,
+    keypair: &dyn crate::crypto::Signer,
+    output_path: P,
+) -> Result<MkpeArchive> {
+    create_mkpe_bundle_with_ownership(dir_path, keypair, output_path, None)
 }
 
 fn validate_bundle_output_path(artifact_path: &Path, output_path: &Path) -> Result<()> {
@@ -949,7 +1015,7 @@ fn validate_bundle_output_path(artifact_path: &Path, output_path: &Path) -> Resu
 
 fn create_artifact_proofs(
     path: &Path,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     sidecar_path: Option<&Path>,
 ) -> Result<Vec<ProofItem>> {
     if path.is_file() {
@@ -970,7 +1036,7 @@ fn create_artifact_proofs(
 fn collect_artifact_proofs(
     root: &Path,
     dir: &Path,
-    keypair: &crate::crypto::KeyPair,
+    keypair: &dyn crate::crypto::Signer,
     sidecar_path: Option<&Path>,
     proofs: &mut Vec<ProofItem>,
 ) -> Result<()> {
@@ -1485,6 +1551,137 @@ mod tests {
         file.read_exact(&mut magic)?;
 
         assert_eq!(&magic, MKPE_MAGIC);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ownership_chain_roundtrip() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
+        std::fs::write(artifact_dir.join("asset.txt"), b"proven bytes")?;
+
+        // Build an ownership chain with one transfer
+        let mut chain = crate::ownership::OwnershipChain::new(
+            "asset-1".to_string(),
+            "genesis-1".to_string(),
+        );
+        let buyer = crate::crypto::generate_keypair();
+        let mut manifest = crate::ownership::TransferManifest::new(
+            "asset-1".to_string(),
+            Some("genesis-1".to_string()),
+            keypair.key_id.clone(),
+            buyer.key_id.clone(),
+            None,
+            42,
+            crate::ownership::TransferTerms::default(),
+            vec![keypair.key_id.clone(), buyer.key_id.clone()],
+        );
+        manifest.sign(&keypair)?;
+        manifest.sign(&buyer)?;
+        assert!(manifest.is_valid());
+
+        let mut pubkeys = std::collections::HashMap::new();
+        pubkeys.insert(keypair.key_id.clone(), keypair.public_key.clone());
+        pubkeys.insert(buyer.key_id.clone(), buyer.public_key.clone());
+        chain.append(manifest, &pubkeys)?;
+        assert!(chain.is_valid());
+        assert_eq!(chain.transfer_count(), 1);
+
+        // Create bundle with ownership
+        let archive_path = temp_dir.path().join("artifact.mkpe");
+        let archive = create_mkpe_bundle_with_ownership(
+            &artifact_dir, &keypair, &archive_path, Some(chain.clone()),
+        )?;
+
+        assert!(archive.ownership.is_some());
+        let stats = archive.stats();
+        assert!(stats.has_ownership);
+        assert_eq!(stats.transfer_count, 1);
+
+        // Load and verify roundtrip
+        let loaded = MkpeArchive::load(&archive_path)?;
+        assert!(loaded.ownership.is_some());
+        let loaded_chain = loaded.ownership.as_ref().unwrap();
+        assert_eq!(loaded_chain.asset_id, "asset-1");
+        assert_eq!(loaded_chain.transfer_count(), 1);
+        assert!(loaded_chain.is_valid());
+
+        let verified = loaded.verify()?;
+        assert!(verified.inner().ownership.as_ref().unwrap().is_valid());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ownership_chain_backward_compatible_without_ownership() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
+        std::fs::write(artifact_dir.join("asset.txt"), b"proven bytes")?;
+
+        let archive_path = temp_dir.path().join("artifact.mkpe");
+        create_mkpe_bundle(&artifact_dir, &keypair, &archive_path)?;
+
+        let loaded = MkpeArchive::load(&archive_path)?;
+        assert!(loaded.ownership.is_none());
+        assert_eq!(loaded.stats().has_ownership, false);
+        assert!(loaded.verify().is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_ownership_chain_revoked_fails_verify() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let keypair = crate::crypto::generate_keypair();
+        let artifact_dir = temp_dir.path().join("artifact");
+        std::fs::create_dir(&artifact_dir)?;
+        std::fs::write(artifact_dir.join("asset.txt"), b"proven bytes")?;
+
+        let mut chain = crate::ownership::OwnershipChain::new(
+            "asset-1".to_string(),
+            "genesis-1".to_string(),
+        );
+        let buyer = crate::crypto::generate_keypair();
+        let mut manifest = crate::ownership::TransferManifest::new(
+            "asset-1".to_string(),
+            Some("genesis-1".to_string()),
+            keypair.key_id.clone(),
+            buyer.key_id.clone(),
+            None,
+            42,
+            crate::ownership::TransferTerms::default(),
+            vec![keypair.key_id.clone(), buyer.key_id.clone()],
+        );
+        manifest.sign(&keypair)?;
+        manifest.sign(&buyer)?;
+
+        let mut pubkeys = std::collections::HashMap::new();
+        pubkeys.insert(keypair.key_id.clone(), keypair.public_key.clone());
+        pubkeys.insert(buyer.key_id.clone(), buyer.public_key.clone());
+        chain.append(manifest.clone(), &pubkeys)?;
+
+        // Revoke the transfer
+        let revocation = crate::ownership::RevocationEntry::new(
+            manifest.transfer_id.clone(),
+            "Fraudulent transfer".to_string(),
+            &keypair,
+        )?;
+        chain.revoke(revocation, &keypair.public_key)?;
+        assert!(!chain.is_valid());
+
+        let archive_path = temp_dir.path().join("artifact.mkpe");
+        create_mkpe_bundle_with_ownership(
+            &artifact_dir, &keypair, &archive_path, Some(chain),
+        )?;
+
+        let loaded = MkpeArchive::load(&archive_path)?;
+        assert!(loaded.ownership.is_some());
+        assert!(loaded.verify().is_err());
 
         Ok(())
     }

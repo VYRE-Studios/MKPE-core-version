@@ -5,9 +5,9 @@
 use crate::{MkpeError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+	use std::fs::OpenOptions;
+	use std::io::{BufRead, Write};
+	use std::path::{Path, PathBuf};
 
 /// Types of audit events
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -28,24 +28,27 @@ pub enum AuditEventType {
     SystemError,
 }
 
-/// A single audit log entry
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEvent {
-    /// Unique ID for this event
-    pub id: String,
-    /// Timestamp (UTC)
-    pub timestamp: DateTime<Utc>,
-    /// Event type
-    pub event_type: AuditEventType,
-    /// Involved file or resource (optional)
-    pub target: Option<String>,
-    /// Detailed message
-    pub message: String,
-    /// System user
-    pub user: String,
-    /// Severity (INFO, WARN, ERROR, CRITICAL)
-    pub severity: String,
-}
+	/// A single audit log entry
+	#[derive(Debug, Clone, Serialize, Deserialize)]
+	pub struct AuditEvent {
+		/// Unique ID for this event
+		pub id: String,
+		/// Timestamp (UTC)
+		pub timestamp: DateTime<Utc>,
+		/// Event type
+		pub event_type: AuditEventType,
+		/// Involved file or resource (optional)
+		pub target: Option<String>,
+		/// Detailed message
+		pub message: String,
+		/// System user
+		pub user: String,
+		/// Severity (INFO, WARN, ERROR, CRITICAL)
+		pub severity: String,
+		/// Optional hash linking to the previous audit entry for chain integrity
+		#[serde(skip_serializing_if = "Option::is_none")]
+		pub previous_hash: Option<String>,
+	}
 
 impl AuditEvent {
     pub fn new(
@@ -61,9 +64,16 @@ impl AuditEvent {
             target,
             message,
             user: whoami::username(),
-            severity: severity.to_string(),
-        }
-    }
+			severity: severity.to_string(),
+			previous_hash: None,
+		}
+	}
+
+	/// Set the previous hash for chain linking
+	pub fn with_previous_hash(mut self, hash: String) -> Self {
+		self.previous_hash = Some(hash);
+		self
+	}
 }
 
 /// Audit log manager
@@ -117,6 +127,67 @@ impl AuditLog {
             "CRITICAL",
         ))
     }
+
+	/// Read all audit entries from the log file
+	pub fn read_entries(&self) -> Result<Vec<AuditEvent>> {
+		let mut entries = Vec::new();
+		let file = std::fs::File::open(&self.log_path).map_err(MkpeError::IoError)?;
+		let reader = std::io::BufReader::new(file);
+		for line in reader.lines() {
+			let line = line.map_err(MkpeError::IoError)?;
+			if line.trim().is_empty() {
+				continue;
+			}
+			let event: AuditEvent = serde_json::from_str(&line).map_err(MkpeError::JsonError)?;
+			entries.push(event);
+		}
+		Ok(entries)
+	}
+
+	/// Compute SHA-256 hash of a single audit event JSON
+	fn entry_hash(event: &AuditEvent) -> String {
+		use sha2::{Digest, Sha256};
+		let json = serde_json::to_string(event).unwrap_or_default();
+		let mut hasher = Sha256::new();
+		hasher.update(json.as_bytes());
+		hex::encode(hasher.finalize())
+	}
+
+	/// Compute the Merkle root of all entries in the log
+	pub fn compute_merkle_root(&self) -> Result<Option<String>> {
+		let entries = self.read_entries()?;
+		if entries.is_empty() {
+			return Ok(None);
+		}
+		let hashes: Vec<String> = entries.iter().map(|e| Self::entry_hash(e)).collect();
+		Ok(Some(crate::proof::build_merkle_root(&hashes)))
+	}
+
+	/// Verify chain integrity: every entry's previous_hash must match the hash of the prior entry
+	pub fn verify_chain(&self) -> Result<bool> {
+		let entries = self.read_entries()?;
+		if entries.len() < 2 {
+			return Ok(true);
+		}
+		for i in 1..entries.len() {
+			let prev_hash = Self::entry_hash(&entries[i - 1]);
+			if entries[i].previous_hash.as_deref() != Some(prev_hash.as_str()) {
+				return Ok(false);
+			}
+		}
+		Ok(true)
+	}
+
+	/// Log an event with automatic chain linking to the previous entry
+	pub fn log_chained(&self, event: AuditEvent) -> Result<()> {
+		let mut event = event;
+		if let Ok(entries) = self.read_entries() {
+			if let Some(last) = entries.last() {
+				event.previous_hash = Some(Self::entry_hash(last));
+			}
+		}
+		self.log(&event)
+	}
 }
 
 #[cfg(test)]

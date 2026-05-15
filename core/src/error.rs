@@ -33,6 +33,9 @@ pub enum MkpeError {
 
     #[error("Audit error: {0}")]
     AuditError(String),
+
+    #[error("Hardware key error: {0}")]
+    HardwareKeyError(String),
 }
 
 pub type Result<T> = std::result::Result<T, MkpeError>;
